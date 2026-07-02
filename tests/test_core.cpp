@@ -3,9 +3,8 @@
 // identity), so a pass is a correctness proof for that scenario.
 #include <cmath>
 #include <cstdio>
-
-#include <cstdio>
 #include <fstream>
+#include <vector>
 
 #include "arcedge/design.hpp"
 #include "arcedge/dijkstra.hpp"
@@ -200,6 +199,45 @@ static void test_design_capacity_repair() {
   CHECK(std::abs(res.total_cost - 20200.0) < 1e-6);
 }
 
+// The DAG level-sweep kernel (the GPU port's exact structure) must agree with
+// Dijkstra on every commodity of a time-expanded instance, for the base costs
+// and for perturbed (reduced-cost-like) metrics.
+static void test_dag_backend_equivalence() {
+  GeneratorParams p;
+  p.width = 12;
+  p.height = 12;
+  p.time_steps = 9;
+  p.commodities = 25;
+  p.capacity = 3;
+  p.seed = 31;
+  Instance inst = generate(p);
+  DagLevels dag = DagLevels::build(inst);
+  CHECK(dag.is_dag);
+  CHECK(dag.num_levels == p.time_steps);  // layered by construction
+  Graph g = Graph::build(inst);
+  SpBuffers b1, b2;
+  for (int trial = 0; trial < 3; ++trial) {
+    std::vector<double> cost(inst.arcs.size());
+    for (size_t a = 0; a < cost.size(); ++a)
+      cost[a] = inst.arcs[a].cost + trial * 0.37 * static_cast<double>(a % 7);
+    for (const Commodity& k : inst.commodities) {
+      const double d1 = shortest_path(g, cost, k.src, k.dst, b1);
+      const double d2 = dag_shortest_path(dag, inst, cost, k.src, k.dst, b2);
+      CHECK(std::abs(d1 - d2) < 1e-9);
+    }
+  }
+  // Full solves through both backends land on the same bounds.
+  SolveOptions opt;
+  opt.max_iters = 60;
+  opt.threads = 2;
+  opt.verbose = false;
+  SolveResult r1 = solve(inst, opt);
+  opt.sp_backend = "dag";
+  SolveResult r2 = solve(inst, opt);
+  CHECK(std::abs(r1.best_lb - r2.best_lb) < 1e-6 * std::max(1.0, r1.best_lb));
+  CHECK(std::abs(r1.best_ub - r2.best_ub) < 1e-6 * std::max(1.0, r1.best_ub));
+}
+
 int main() {
   test_dijkstra();
   test_diamond_exact();
@@ -208,6 +246,7 @@ int main() {
   test_street_graph_expansion();
   test_design_single_hub();
   test_design_capacity_repair();
+  test_dag_backend_equivalence();
   if (failures == 0) {
     std::printf("all tests passed\n");
     return 0;

@@ -21,7 +21,8 @@ void usage() {
       "              [--time N] [--commodities N] [--cap X (<=0 = uncapacitated)]\n"
       "              [--hubs N] [--hub-frac X] [--wait-cost X] [--seed N]\n"
       "  arcedge solve INSTANCE [--iters N] [--tol X] [--threads N]\n"
-      "              [--primal-every N] [--result FILE] [--quiet]\n"
+      "              [--primal-every N] [--sp-backend auto|dijkstra|dag|cuda]\n"
+      "              [--result FILE] [--quiet]\n"
       "  arcedge design --graph FILE --pois FILE [--cap X] [--hub-cost X]\n"
       "              [--cable-cost X] [--max-k N] [--seed N] [--result FILE]\n"
       "              [--quiet]\n");
@@ -78,6 +79,7 @@ int run_solve(int argc, char** argv) {
     else if (arg_match(argc, argv, i, "--tol", v)) opt.gap_tol = std::stod(v);
     else if (arg_match(argc, argv, i, "--threads", v)) opt.threads = std::stoi(v);
     else if (arg_match(argc, argv, i, "--primal-every", v)) opt.primal_every = std::stoi(v);
+    else if (arg_match(argc, argv, i, "--sp-backend", v)) opt.sp_backend = v;
     else if (arg_match(argc, argv, i, "--result", v)) result_path = v;
     else if (std::strcmp(argv[i], "--quiet") == 0) opt.verbose = false;
     else { std::fprintf(stderr, "unknown option: %s\n", argv[i]); return 2; }

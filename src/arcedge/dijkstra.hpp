@@ -26,4 +26,25 @@ double shortest_path(const Graph& g, const std::vector<double>& cost, int32_t sr
 void extract_path(const SpBuffers& buf, const Instance& inst, int32_t src, int32_t dst,
                   std::vector<int32_t>& out);
 
+// Topological levels of a DAG instance (time-expanded graphs are layered
+// DAGs). Arcs are bucketed by tail level; relaxing buckets in ascending level
+// order computes exact shortest paths in one O(m) sweep with no priority
+// queue -- the same bulk-relaxation structure the CUDA backend executes, one
+// kernel launch per level.
+struct DagLevels {
+  bool is_dag = false;
+  int32_t num_levels = 0;
+  std::vector<int32_t> level_of;       // per node
+  std::vector<int32_t> arcs_by_level;  // arc ids grouped by tail level
+  std::vector<int32_t> level_off;      // size num_levels + 1 into arcs_by_level
+
+  static DagLevels build(const Instance& inst);
+};
+
+// Exact SSSP on a DAG via the level sweep. Semantics match shortest_path():
+// same cost vector convention (>= kInf means absent), same buffers.
+double dag_shortest_path(const DagLevels& dag, const Instance& inst,
+                         const std::vector<double>& cost, int32_t src, int32_t dst,
+                         SpBuffers& buf);
+
 }  // namespace arcedge

@@ -4,11 +4,16 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <memory>
+#include <stdexcept>
 #include <thread>
 
 #include "dijkstra.hpp"
 #include "graph.hpp"
 #include "primal.hpp"
+#ifdef ARCEDGE_CUDA
+#include "cuda_sssp.hpp"
+#endif
 
 namespace arcedge {
 
@@ -16,7 +21,9 @@ namespace {
 
 // Solves the shortest-path subproblem for every commodity, distributing
 // commodities across threads. Fills per-commodity distances and path arc ids.
+// `dag` selects the topological level-sweep kernel instead of Dijkstra.
 void batched_shortest_paths(const Instance& inst, const Graph& g,
+                            const DagLevels* dag,
                             const std::vector<double>& cost, int threads,
                             std::vector<double>& dists,
                             std::vector<std::vector<int32_t>>& paths) {
@@ -26,7 +33,8 @@ void batched_shortest_paths(const Instance& inst, const Graph& g,
     SpBuffers buf;
     for (size_t k = next.fetch_add(1); k < nk; k = next.fetch_add(1)) {
       const Commodity& com = inst.commodities[k];
-      dists[k] = shortest_path(g, cost, com.src, com.dst, buf);
+      dists[k] = dag ? dag_shortest_path(*dag, inst, cost, com.src, com.dst, buf)
+                     : shortest_path(g, cost, com.src, com.dst, buf);
       paths[k].clear();
       if (dists[k] < kInf) extract_path(buf, inst, com.src, com.dst, paths[k]);
     }
@@ -45,6 +53,29 @@ SolveResult solve(const Instance& inst, const SolveOptions& opt) {
   const Graph g = Graph::build(inst);
   const size_t m = inst.arcs.size();
   const size_t nk = inst.commodities.size();
+
+  std::string backend = opt.sp_backend == "auto" ? "dijkstra" : opt.sp_backend;
+  DagLevels dag;
+  if (backend == "dag" || backend == "cuda") {
+    dag = DagLevels::build(inst);
+    if (!dag.is_dag)
+      throw std::runtime_error("--sp-backend " + backend +
+                               " requires a DAG (time-expanded) instance");
+  }
+#ifdef ARCEDGE_CUDA
+  std::unique_ptr<CudaBatchSssp> cuda_engine;
+  if (backend == "cuda") {
+    if (!CudaBatchSssp::available())
+      throw std::runtime_error("no CUDA device available");
+    cuda_engine.reset(new CudaBatchSssp(inst, dag));
+  }
+#else
+  if (backend == "cuda")
+    throw std::runtime_error("arcedge was built without -DARCEDGE_CUDA=ON");
+#endif
+  if (backend != "dijkstra" && backend != "dag" && backend != "cuda")
+    throw std::runtime_error("unknown --sp-backend: " + backend);
+  if (opt.verbose) std::printf("sp backend: %s\n", backend.c_str());
 
   std::vector<double> lambda(m, 0.0);  // stays 0 on uncapacitated arcs
   std::vector<double> reduced(m);
@@ -66,7 +97,13 @@ SolveResult solve(const Instance& inst, const SolveOptions& opt) {
   for (int iter = 0; iter < opt.max_iters; ++iter) {
     res.iters = iter + 1;
     for (size_t a = 0; a < m; ++a) reduced[a] = inst.arcs[a].cost + lambda[a];
-    batched_shortest_paths(inst, g, reduced, opt.threads, dists, paths);
+#ifdef ARCEDGE_CUDA
+    if (cuda_engine)
+      cuda_engine->solve(reduced, inst.commodities, dists, paths);
+    else
+#endif
+      batched_shortest_paths(inst, g, backend == "dag" ? &dag : nullptr,
+                             reduced, opt.threads, dists, paths);
 
     // L(lambda) = sum_k q_k * d_lambda(o_k, d_k) - sum_a lambda_a * u_a
     double lb = 0.0;

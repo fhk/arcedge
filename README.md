@@ -107,6 +107,27 @@ Results with capacity 500, hub cost 20,000, cable cost 10/m:
 (Full-city cable = 1,131 km of mandatory POI drops + ~1,021 km of shared
 street cable, 49 % of the 2,102 km street network.)
 
+## Stage 2: shortest-path backends & GPU
+
+The Lagrangian subproblem runs on a pluggable backend
+(`solve --sp-backend ...`):
+
+- `dijkstra` (default) — per-commodity binary-heap Dijkstra on CPU threads.
+- `dag` — topological level sweep (time-expanded graphs are layered DAGs, so
+  SSSP is one O(m) pass with no priority queue). Bit-equal results, ~1.26×
+  faster than Dijkstra on the SF instance, and structurally identical to the
+  GPU kernel.
+- `cuda` — the level sweep on GPU (build with `cmake -DARCEDGE_CUDA=ON`):
+  one bulk-relaxation kernel per time layer, all commodities batched, graph
+  resident on device across subgradient iterations, FP32 distances packed
+  with the parent arc into one 64-bit word (single atomicMin keeps them
+  consistent).
+
+No GPU is available in this dev environment — run
+[`notebooks/arcedge_stage2_colab.ipynb`](notebooks/arcedge_stage2_colab.ipynb)
+in Google Colab (GPU runtime) to build the CUDA backend, run the unit tests,
+and benchmark all three backends with equivalence assertions.
+
 ## CLI
 
 ```bash

@@ -1,4 +1,4 @@
-# arcedge — Stage 1 Implementation Plan
+# arcedge — Implementation Plan (Stage 1 ✅ → Stage 2)
 
 **Stage 1 (weeks 0–8): Combinatorial core MVP.**
 Build the Lagrangian decomposition for capacitated multicommodity flow (MCF) on
@@ -200,3 +200,60 @@ All unit tests pass (`ctest`): Dijkstra correctness, hand-computed capacitated
 optimum, uncapacitated zero-gap identity, generator invariants. Both HiGHS
 validations satisfy `LB ≤ LP* ≤ UB`, and gaps are inside the ≤ 2% Stage 1
 threshold — the combinatorial core architecture is demonstrated end to end.
+
+**Stage 1 exit review: PASSED.** Every validated instance is inside the ≤ 2%
+gap threshold, real Overture street + places data flows through the whole
+pipeline, and the fixed-charge design mode beats a time-limited HiGHS MIP
+incumbent at validation scale. Performance baseline to beat (4-core CPU):
+1.7M-arc time-expanded MCF at 0.68% gap in 9.8 s; full-SF access design
+(54,921 POIs) at total cost 24,620,259.
+
+---
+
+# Stage 2 (weeks 8–16): GPU batched subproblems + LNS + Steiner engine
+
+Per the architecture study: port the per-commodity shortest paths to GPU
+(batched delta-stepping/Bellman-Ford, FP32), add Large Neighborhood Search
+with fix-and-optimize sub-MIPs (HiGHS), and add the dual-ascent + reduction +
+local-search Steiner engine.
+
+> **Exit criterion: end-to-end 1M-arc instance within target wall-clock at an
+> empirically validated gap ≤ 1–3%**, and LNS demonstrably improving
+> design-mode solutions over the Stage 1 matheuristic baseline.
+
+## Stage 2 milestones
+
+| # | Weeks | Deliverable | Acceptance test |
+|---|-------|-------------|-----------------|
+| S2-M0 | 8–9 | **GPU-shape SSSP kernel, CPU-portable**: batched frontier Bellman-Ford (near-far/delta-stepping-ready), SoA layout, no priority queue — the exact loop structure a CUDA warp executes — behind the same `batched_shortest_paths` seam, selectable per run | bit-equal distances vs Dijkstra backend on the full validation suite; wall-clock parity report CPU-vs-CPU |
+| S2-M1 | 9–11 | **CUDA backend** for the same kernel (`-DARCEDGE_CUDA=ON`): graph + costs resident on device across subgradient iterations, one commodity per block batch, FP32 with FP64 accumulation of L(λ) | compiles + equivalence-tested on a CUDA box (RTX 3090 target); ≥ 10× batch throughput vs 4-core CPU expected per literature |
+| S2-M2 | 10–12 | **LNS fix-and-optimize for design mode**: cluster-neighborhood destroy/rebuild, sub-MIP per (merged) hub cluster with HiGHS warm-started from the incumbent — never worsens, strictly improves where the MIP finds better | measurable total-cost reduction on the SF design baseline (24,620,259) within a fixed time budget |
+| S2-M3 | 12–14 | **LNS for time-expanded MCF**: fix-and-optimize over time windows / spatial partitions (KaMinPar blocks), HiGHS on sub-MIPs; volume-algorithm dual upgrade if the subgradient tail is the binding constraint | gap ≤ 1% on the benchmark ladder at fixed budget |
+| S2-M4 | 13–16 | **Steiner/PCST engine v0**: Wong dual ascent on the directed formulation for design-mode lower bounds at full scale + bound-based reductions; pcst_fast-style GW as primal warm start | full-SF design gets a certified gap (LB, not just heuristic); reductions shrink instances ≥ 50% on benchmarks |
+| S2-M5 | 16 | Stage-gate: benchmark ladder re-run, results table, go/no-go for Stage 3 GPU-LP companion | exit criterion above |
+
+Notes:
+- This dev container has no GPU; S2-M0 is deliberately CPU-portable so the
+  algorithmic port is proven (equivalence, frontier behavior, memory layout)
+  before touching CUDA. S2-M1 code lands compile-guarded and is exercised on
+  GPU hardware via **`notebooks/arcedge_stage2_colab.ipynb`** (Google Colab,
+  T4/A100): build with `-DARCEDGE_CUDA=ON`, unit tests, three-backend
+  benchmark with equivalence assertions.
+- Design-mode clusters are edge-disjoint by construction (SPH routing is
+  region-restricted), so per-cluster sub-MIPs compose into a globally feasible
+  solution — LNS neighborhoods are sound without boundary duals.
+
+## Stage 2 progress
+
+| Milestone | Status | Evidence |
+|-----------|--------|----------|
+| S2-M0 CPU DAG level-sweep backend | **done** | `--sp-backend dag`: bit-equal LB/UB with Dijkstra on the SF 1.7M-arc instance (lb 1390235.88, ub 1399750.63, 21 iters both) and already 1.26× faster on 4 CPU cores (7.9 s vs 10.0 s); unit equivalence test in `ctest` |
+| S2-M1 CUDA backend | code landed, needs GPU run | `src/arcedge/cuda_sssp.cu` (`-DARCEDGE_CUDA=ON`): per-level bulk relaxation, packed 64-bit atomicMin (FP32 dist bits + parent arc), graph resident across iterations; run + measure via the Colab notebook |
+| S2-M2 LNS for design mode | next | — |
+| S2-M3 LNS for MCF | pending | — |
+| S2-M4 Steiner/PCST bounds | pending | — |
+
+Known S2-M1 caveats to close on GPU hardware: FP32 LB needs a final FP64
+re-evaluation of L(λ) for a certified bound; path/load extraction currently
+copies the packed array back per iteration (device-side extraction is the
+follow-up optimization).

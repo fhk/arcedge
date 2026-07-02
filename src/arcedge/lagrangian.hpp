@@ -1,5 +1,6 @@
 #pragma once
 
+#include <string>
 #include <vector>
 
 #include "instance.hpp"
@@ -14,6 +15,11 @@ struct SolveOptions {
   double alpha0 = 1.5;      // initial Polyak step scale, halved on stalls
   int stall_iters = 15;     // halve alpha after this many non-improving iters
   bool verbose = true;
+  // Shortest-path subproblem backend: "auto" (dijkstra), "dijkstra"
+  // (per-commodity binary-heap, CPU threads), "dag" (topological level sweep,
+  // CPU threads -- the GPU kernel's structure, exact on time-expanded DAGs),
+  // or "cuda" (GPU batched level sweep; needs -DARCEDGE_CUDA=ON and a device).
+  std::string sp_backend = "auto";
 };
 
 struct SolveResult {
