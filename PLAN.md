@@ -138,9 +138,19 @@ Instance ladder (generator is seeded/deterministic):
   to 0% and prove nothing.
 - Correctness identities in unit tests: uncapacitated ⇒ gap 0 at iteration 1;
   hand-solvable capacitated diamond ⇒ LB and UB hit the known optimum;
-  Dijkstra and generator invariants.
-- Later in M5: import a real street graph (OSM extract) to confirm behavior is
-  not grid-specific.
+  Dijkstra, street-graph, and generator invariants.
+- Real street graphs (M5, **done early**): `scripts/overture_to_graph.py`
+  imports Overture Maps transportation segments — endpoints become
+  deduplicated nodes, every segment yields bidirectional arcs weighted by
+  geodesic length in meters, largest connected component kept. The San
+  Francisco extract (11,487 nodes / 36,624 directed arcs / 2,102 km) is
+  committed under `data/` and wired into the E2E run at two tiers (downtown
+  crop with HiGHS validation, full city at ~1.7M TE arcs).
+- Lesson from real data: street networks have low-degree cuts, so demand
+  concentration can make instances genuinely infeasible; the solver flags a
+  diverging dual bound (an infeasibility certificate) instead of iterating
+  forever. Instance calibration (capacity vs. demand envelopes) is part of
+  the M5 benchmark design.
 
 Metrics recorded per run: best LB, best UB, gap, iterations, wall-clock,
 threads. Regression rule: no commit may worsen gap-at-fixed-budget by >10% on
@@ -175,6 +185,8 @@ reproduce with `scripts/run_e2e.sh`). Measured on this environment
 | small (10×10, T=8) | 3,220 | 10 | gap **0.77%** in 80 ms | HiGHS LP* = 458.47 ∈ [LB 457.94, UB 461.47] ✓ |
 | medium (20×20, T=12) | 21,120 | 30 | gap **0.00%** in 53 ms (21 iters) | HiGHS LP* = 2101.75 = LB = UB ✓ |
 | large (70×70, T=45) | 1,065,680 | 250 | gap **0.85%** in 14.2 s | LB/UB sandwich (self-certified); pure-cost routing infeasible, λ-guided heuristic recovers feasibility |
+| SF downtown, Overture real data (T=12) | 20,702 | 12 | gap **0.96%** in 0.27 s | HiGHS LP* = 27,666.26 m; LB matches LP* to 4 s.f. ✓ |
+| SF full city, Overture real data (T=36) | 1,683,885 | 150 | gap **0.68%** in 9.8 s | LB/UB sandwich (self-certified) |
 
 All unit tests pass (`ctest`): Dijkstra correctness, hand-computed capacitated
 optimum, uncapacitated zero-gap identity, generator invariants. Both HiGHS

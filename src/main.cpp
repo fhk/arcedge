@@ -8,6 +8,7 @@
 #include "arcedge/generator.hpp"
 #include "arcedge/instance.hpp"
 #include "arcedge/lagrangian.hpp"
+#include "arcedge/street_graph.hpp"
 
 namespace {
 
@@ -15,9 +16,9 @@ void usage() {
   std::printf(
       "arcedge - Stage 1 combinatorial core PoC (Lagrangian capacitated MCF)\n\n"
       "usage:\n"
-      "  arcedge gen --out FILE [--width N] [--height N] [--time N]\n"
-      "              [--commodities N] [--cap X (<=0 = uncapacitated)]\n"
-      "              [--hubs N] [--hub-frac X] [--seed N]\n"
+      "  arcedge gen --out FILE [--street GRAPH | --width N --height N]\n"
+      "              [--time N] [--commodities N] [--cap X (<=0 = uncapacitated)]\n"
+      "              [--hubs N] [--hub-frac X] [--wait-cost X] [--seed N]\n"
       "  arcedge solve INSTANCE [--iters N] [--tol X] [--threads N]\n"
       "              [--primal-every N] [--result FILE] [--quiet]\n");
 }
@@ -31,9 +32,11 @@ bool arg_match(int argc, char** argv, int& i, const char* name, std::string& out
 
 int run_gen(int argc, char** argv) {
   arcedge::GeneratorParams p;
-  std::string out_path, v;
+  std::string out_path, street_path, v;
   for (int i = 2; i < argc; ++i) {
     if (arg_match(argc, argv, i, "--out", v)) out_path = v;
+    else if (arg_match(argc, argv, i, "--street", v)) street_path = v;
+    else if (arg_match(argc, argv, i, "--wait-cost", v)) p.wait_cost = std::stod(v);
     else if (arg_match(argc, argv, i, "--width", v)) p.width = std::stoi(v);
     else if (arg_match(argc, argv, i, "--height", v)) p.height = std::stoi(v);
     else if (arg_match(argc, argv, i, "--time", v)) p.time_steps = std::stoi(v);
@@ -45,7 +48,15 @@ int run_gen(int argc, char** argv) {
     else { std::fprintf(stderr, "unknown option: %s\n", argv[i]); return 2; }
   }
   if (out_path.empty()) { usage(); return 2; }
-  const arcedge::Instance inst = arcedge::generate(p);
+  arcedge::Instance inst;
+  if (!street_path.empty()) {
+    const arcedge::StreetGraph street = arcedge::StreetGraph::load(street_path);
+    std::printf("loaded street graph %s: %d nodes, %zu directed arcs\n",
+                street_path.c_str(), street.num_nodes, street.arcs.size());
+    inst = arcedge::generate_from_street(street, p);
+  } else {
+    inst = arcedge::generate(p);
+  }
   inst.save(out_path);
   std::printf("wrote %s: %d nodes, %zu arcs, %zu commodities\n", out_path.c_str(),
               inst.num_nodes, inst.arcs.size(), inst.commodities.size());

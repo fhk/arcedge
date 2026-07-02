@@ -30,12 +30,30 @@ echo "=== [4/5] medium instance: solve + HiGHS validation ==="
   --result data/medium.result
 python3 scripts/validate_lp.py data/medium.txt data/medium.result
 
-echo "=== [5/5] large instance (~1M arcs): certified LB/UB gap ==="
+echo "=== [5/7] large instance (~1M arcs): certified LB/UB gap ==="
 ./build/arcedge gen --out data/large.txt --width 70 --height 70 --time 45 \
   --commodities 250 --cap 3 --hubs 4 --hub-frac 0.7 --seed 11
 ./build/arcedge solve data/large.txt --iters 150 --tol 0.01 --primal-every 15 \
   --result data/large.result
 
+# Real street data (Overture Maps, San Francisco). The committed .graph files
+# were produced by scripts/overture_to_graph.py from an Overture
+# transportation-segment GeoParquet; rerun that step with:
+#   python3 scripts/overture_to_graph.py streets.parquet data/sf_streets.graph
+echo "=== [6/7] downtown SF (Overture import): solve + HiGHS validation ==="
+./build/arcedge gen --street data/sf_downtown.graph --out data/sf_dt_te.txt \
+  --time 12 --commodities 12 --cap 4 --hubs 2 --hub-frac 0.6 --seed 23
+./build/arcedge solve data/sf_dt_te.txt --iters 400 --tol 0.002 --quiet \
+  --result data/sf_dt_te.result
+python3 scripts/validate_lp.py data/sf_dt_te.txt data/sf_dt_te.result
+
+echo "=== [7/7] full SF street network (~1.7M TE arcs): certified gap ==="
+./build/arcedge gen --street data/sf_streets.graph --out data/sf_te.txt \
+  --time 36 --commodities 150 --cap 8 --hubs 5 --hub-frac 0.5 --seed 17
+./build/arcedge solve data/sf_te.txt --iters 120 --tol 0.01 --primal-every 10 \
+  --result data/sf_te.result
+
 echo
-echo "E2E PASSED: unit tests green, HiGHS confirms lb <= LP* <= ub on small"
-echo "and medium, and the large instance closes to a certified gap."
+echo "E2E PASSED: unit tests green, HiGHS confirms lb <= LP* <= ub on"
+echo "synthetic small/medium and downtown SF, and the synthetic-large and"
+echo "full-SF instances close to certified gaps."

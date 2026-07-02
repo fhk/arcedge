@@ -4,10 +4,14 @@
 #include <cmath>
 #include <cstdio>
 
+#include <cstdio>
+#include <fstream>
+
 #include "arcedge/dijkstra.hpp"
 #include "arcedge/generator.hpp"
 #include "arcedge/graph.hpp"
 #include "arcedge/lagrangian.hpp"
+#include "arcedge/street_graph.hpp"
 
 static int failures = 0;
 #define CHECK(cond)                                                        \
@@ -103,11 +107,51 @@ static void test_generator_shape() {
   }
 }
 
+// Street-graph import + time expansion: a 4-node path graph a-b-c-d expands
+// into T layers with per-layer movement arcs and uncapacitated waiting arcs;
+// commodities are reachable within T-1 hops and solve to a certified gap.
+static void test_street_graph_expansion() {
+  const char* path = "test_street.graph";
+  {
+    std::ofstream f(path);
+    f << "c tiny path graph, lengths in meters\n";
+    f << "g 4 6\n";
+    f << "v 0 -122.40 37.70\nv 1 -122.41 37.71\nv 2 -122.42 37.72\nv 3 -122.43 37.73\n";
+    f << "e 0 1 100\ne 1 0 100\ne 1 2 50\ne 2 1 50\ne 2 3 200\ne 3 2 200\n";
+  }
+  StreetGraph sg = StreetGraph::load(path);
+  CHECK(sg.num_nodes == 4);
+  CHECK(sg.arcs.size() == 6);
+  GeneratorParams p;
+  p.time_steps = 5;
+  p.commodities = 4;
+  p.capacity = 2.0;
+  p.hubs = 1;
+  p.seed = 5;
+  Instance inst = generate_from_street(sg, p);
+  CHECK(inst.num_nodes == 4 * 5);
+  CHECK(inst.arcs.size() == (6u + 4u) * 4u);  // (street + wait) per transition
+  for (const Arc& a : inst.arcs) CHECK(a.head / 4 == a.tail / 4 + 1);
+  for (const Commodity& k : inst.commodities) {
+    CHECK(k.src / 4 == 0);
+    CHECK(k.dst / 4 == p.time_steps - 1);
+  }
+  SolveOptions opt;
+  opt.max_iters = 200;
+  opt.threads = 2;
+  opt.verbose = false;
+  SolveResult res = solve(inst, opt);
+  CHECK(res.best_ub < kInf);
+  CHECK(res.best_lb <= res.best_ub + 1e-9);
+  std::remove(path);
+}
+
 int main() {
   test_dijkstra();
   test_diamond_exact();
   test_uncapacitated_zero_gap();
   test_generator_shape();
+  test_street_graph_expansion();
   if (failures == 0) {
     std::printf("all tests passed\n");
     return 0;

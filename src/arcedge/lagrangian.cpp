@@ -61,6 +61,7 @@ SolveResult solve(const Instance& inst, const SolveOptions& opt) {
 
   double alpha = opt.alpha0;
   int no_improve = 0;
+  double lb_free_flow = 0.0;  // LB at lambda = 0, set on the first iteration
 
   for (int iter = 0; iter < opt.max_iters; ++iter) {
     res.iters = iter + 1;
@@ -80,12 +81,26 @@ SolveResult solve(const Instance& inst, const SolveOptions& opt) {
     for (size_t a = 0; a < m; ++a)
       if (inst.arcs[a].capacitated()) lb -= lambda[a] * inst.arcs[a].cap;
 
+    if (iter == 0) lb_free_flow = lb;
     if (lb > res.best_lb + 1e-12) {
       res.best_lb = lb;
       no_improve = 0;
     } else if (++no_improve >= opt.stall_iters) {
       alpha *= 0.5;
       no_improve = 0;
+    }
+
+    // An unbounded Lagrangian dual certifies primal infeasibility. If no
+    // feasible flow has been found and the bound has blown far past the
+    // free-flow cost, stop and say so instead of stepping forever.
+    if (res.best_ub >= kInf && iter >= 30 &&
+        res.best_lb > 20.0 * std::abs(lb_free_flow) + 1.0) {
+      std::fprintf(stderr,
+                   "dual bound diverging (%.4g vs free-flow %.4g) with no feasible "
+                   "primal: instance is likely infeasible -- raise capacities, "
+                   "add time steps, or spread demand\n",
+                   res.best_lb, lb_free_flow);
+      break;
     }
 
     std::fill(load.begin(), load.end(), 0.0);
