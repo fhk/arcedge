@@ -187,6 +187,14 @@ reproduce with `scripts/run_e2e.sh`). Measured on this environment
 | large (70×70, T=45) | 1,065,680 | 250 | gap **0.85%** in 14.2 s | LB/UB sandwich (self-certified); pure-cost routing infeasible, λ-guided heuristic recovers feasibility |
 | SF downtown, Overture real data (T=12) | 20,702 | 12 | gap **0.96%** in 0.27 s | HiGHS LP* = 27,666.26 m; LB matches LP* to 4 s.f. ✓ |
 | SF full city, Overture real data (T=36) | 1,683,885 | 150 | gap **0.68%** in 9.8 s | LB/UB sandwich (self-certified) |
+| SF downtown hub design (400 POIs, fixed-charge) | — | — | total **392,123** | beats the 240 s HiGHS MIP incumbent (397,618) ✓ |
+| SF full-city hub design (54,921 POIs, fixed-charge) | — | — | 155 hubs + 2,152 km cable = **24,620,259** | heuristic (matheuristic, no bound at this scale yet) |
+
+The fixed-charge edge-assignment problem family (M6 stretch) is exercised
+early through `arcedge design`: POI access design over the Overture graph
+(hub location + capacitated fixed-charge routing, SPH Steiner consolidation).
+Exact bounding for it at full scale is Stage 2 work (knapsack relaxation /
+dual ascent); at validation scale the HiGHS MIP harness covers it.
 
 All unit tests pass (`ctest`): Dijkstra correctness, hand-computed capacitated
 optimum, uncapacitated zero-gap identity, generator invariants. Both HiGHS

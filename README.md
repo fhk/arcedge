@@ -70,6 +70,43 @@ instance genuinely infeasible. The solver detects this — an unbounded
 Lagrangian dual is an infeasibility certificate — and reports it instead of
 iterating forever.
 
+## POI access design (Overture Places + hub location)
+
+`scripts/connect_pois.py` connects Overture Places POIs to the street graph:
+each POI snaps to its **nearest street edge** by a perpendicular straight-line
+drop, the edge is **broken at the intersection (foot) point**, and the drop
+becomes a new edge from the POI node to the split node. Edges hit by several
+POIs are split at every foot point; foot points near an existing node snap to
+it instead of creating slivers. For the SF extract: all 54,921 POIs connected,
+41,163 edge splits, median drop 16 m.
+
+`arcedge design` then solves the capacitated hub-location / fixed-charge
+access design on the augmented graph: open hubs (fixed cost each, throughput
+uncapacitated, any non-POI node), route every POI's unit demand to a hub,
+no street edge may carry more than `--cap` units, and every edge that carries
+flow pays `--cable-cost` × length **once** (a cable is shared). The
+matheuristic combines k-means seeding, multi-source-Dijkstra clustering with
+capacity repair (relief hubs opened at overloaded funnels), Lloyd
+re-centering, sequential shortest-path-heuristic Steiner consolidation
+(tree edges are sunk cost, saturated edges blocked), and a search over the
+hub count.
+
+```bash
+python3 scripts/connect_pois.py data/sf_streets.graph places_sf.parquet data/sf_access
+./build/arcedge design --graph data/sf_access.graph --pois data/sf_access.pois \
+    --cap 500 --hub-cost 20000 --cable-cost 10
+```
+
+Results with capacity 500, hub cost 20,000, cable cost 10/m:
+
+| Instance | POIs | Hubs | Cable | Total cost | Reference |
+|----------|-----:|-----:|------:|-----------:|-----------|
+| SF downtown crop | 400 | 1 | 37,212 m | **392,123** | beats the 240 s HiGHS MIP incumbent (397,618); ≥ its dual bound ✓ |
+| SF full city | 54,921 | 155 | 2,152,026 m | **24,620,259** | hubs 3.10 M + cable 21.52 M |
+
+(Full-city cable = 1,131 km of mandatory POI drops + ~1,021 km of shared
+street cable, 49 % of the 2,102 km street network.)
+
 ## CLI
 
 ```bash

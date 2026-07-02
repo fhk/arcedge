@@ -2,5 +2,8 @@ build/
 data/*.txt
 data/*.result
 data/*.gz
+# regenerate with scripts/connect_pois.py (needs the Overture places parquet)
+data/sf_access.graph
+data/sf_access.pois
 __pycache__/
 *.o

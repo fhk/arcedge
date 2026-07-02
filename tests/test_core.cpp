@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <fstream>
 
+#include "arcedge/design.hpp"
 #include "arcedge/dijkstra.hpp"
 #include "arcedge/generator.hpp"
 #include "arcedge/graph.hpp"
@@ -146,12 +147,67 @@ static void test_street_graph_expansion() {
   std::remove(path);
 }
 
+// Hand-checkable hub design. Streets 0-1-2 (100 m each); POIs 3 and 4 drop
+// to nodes 0 and 2 with 10 m drops. Any single hub uses all 220 m of cable:
+// total = 20000 + 10 * 220 = 22200. Two hubs would cost 40000 + 200: worse.
+static void test_design_single_hub() {
+  StreetGraph g;
+  g.num_nodes = 5;
+  g.lon = {0, 0.001, 0.002, 0, 0.002};
+  g.lat = {37.77, 37.77, 37.77, 37.7701, 37.7701};
+  auto both = [&](int32_t u, int32_t v, double w) {
+    g.arcs.push_back({u, v, w});
+    g.arcs.push_back({v, u, w});
+  };
+  both(0, 1, 100);
+  both(1, 2, 100);
+  both(3, 0, 10);
+  both(4, 2, 10);
+  DesignParams p;
+  p.edge_cap = 500;
+  p.hub_cost = 20000;
+  p.cable_cost_per_m = 10;
+  p.verbose = false;
+  DesignResult res = design(g, {3, 4}, p);
+  CHECK(res.feasible);
+  CHECK(res.hubs == 1);
+  CHECK(std::abs(res.total_cost - 22200.0) < 1e-6);
+}
+
+// Capacity repair: both POIs drop to node 0, edge capacity 1. A hub at node 1
+// would overload edge 0-1 (load 2), so the relief pass must end with a hub at
+// node 0: cable = the two 10 m drops, total = 20000 + 10 * 20 = 20200.
+static void test_design_capacity_repair() {
+  StreetGraph g;
+  g.num_nodes = 4;
+  g.lon = {0, 0.001, 0, 0};
+  g.lat = {37.77, 37.77, 37.7701, 37.7702};
+  auto both = [&](int32_t u, int32_t v, double w) {
+    g.arcs.push_back({u, v, w});
+    g.arcs.push_back({v, u, w});
+  };
+  both(0, 1, 100);
+  both(2, 0, 10);
+  both(3, 0, 10);
+  DesignParams p;
+  p.edge_cap = 1;
+  p.hub_cost = 20000;
+  p.cable_cost_per_m = 10;
+  p.verbose = false;
+  DesignResult res = design(g, {2, 3}, p);
+  CHECK(res.feasible);
+  CHECK(res.hubs == 1);
+  CHECK(std::abs(res.total_cost - 20200.0) < 1e-6);
+}
+
 int main() {
   test_dijkstra();
   test_diamond_exact();
   test_uncapacitated_zero_gap();
   test_generator_shape();
   test_street_graph_expansion();
+  test_design_single_hub();
+  test_design_capacity_repair();
   if (failures == 0) {
     std::printf("all tests passed\n");
     return 0;

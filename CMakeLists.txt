@@ -15,6 +15,7 @@ add_library(arcedge_core
   src/arcedge/dijkstra.cpp
   src/arcedge/generator.cpp
   src/arcedge/street_graph.cpp
+  src/arcedge/design.cpp
   src/arcedge/primal.cpp
   src/arcedge/lagrangian.cpp
 )

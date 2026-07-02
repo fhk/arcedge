@@ -4,6 +4,7 @@
 #include <string>
 #include <thread>
 
+#include "arcedge/design.hpp"
 #include "arcedge/dijkstra.hpp"
 #include "arcedge/generator.hpp"
 #include "arcedge/instance.hpp"
@@ -20,7 +21,10 @@ void usage() {
       "              [--time N] [--commodities N] [--cap X (<=0 = uncapacitated)]\n"
       "              [--hubs N] [--hub-frac X] [--wait-cost X] [--seed N]\n"
       "  arcedge solve INSTANCE [--iters N] [--tol X] [--threads N]\n"
-      "              [--primal-every N] [--result FILE] [--quiet]\n");
+      "              [--primal-every N] [--result FILE] [--quiet]\n"
+      "  arcedge design --graph FILE --pois FILE [--cap X] [--hub-cost X]\n"
+      "              [--cable-cost X] [--max-k N] [--seed N] [--result FILE]\n"
+      "              [--quiet]\n");
 }
 
 bool arg_match(int argc, char** argv, int& i, const char* name, std::string& out) {
@@ -93,12 +97,61 @@ int run_solve(int argc, char** argv) {
   return res.best_ub < arcedge::kInf ? 0 : 1;
 }
 
+int run_design(int argc, char** argv) {
+  arcedge::DesignParams p;
+  std::string graph_path, pois_path, result_path, v;
+  for (int i = 2; i < argc; ++i) {
+    if (arg_match(argc, argv, i, "--graph", v)) graph_path = v;
+    else if (arg_match(argc, argv, i, "--pois", v)) pois_path = v;
+    else if (arg_match(argc, argv, i, "--cap", v)) p.edge_cap = std::stod(v);
+    else if (arg_match(argc, argv, i, "--hub-cost", v)) p.hub_cost = std::stod(v);
+    else if (arg_match(argc, argv, i, "--cable-cost", v)) p.cable_cost_per_m = std::stod(v);
+    else if (arg_match(argc, argv, i, "--max-k", v)) p.max_k = std::stoi(v);
+    else if (arg_match(argc, argv, i, "--seed", v)) p.seed = static_cast<unsigned>(std::stoul(v));
+    else if (arg_match(argc, argv, i, "--result", v)) result_path = v;
+    else if (std::strcmp(argv[i], "--quiet") == 0) p.verbose = false;
+    else { std::fprintf(stderr, "unknown option: %s\n", argv[i]); return 2; }
+  }
+  if (graph_path.empty() || pois_path.empty()) { usage(); return 2; }
+  const arcedge::StreetGraph g = arcedge::StreetGraph::load(graph_path);
+  std::vector<int32_t> pois;
+  {
+    std::ifstream in(pois_path);
+    if (!in) { std::fprintf(stderr, "cannot open pois file\n"); return 1; }
+    int32_t id;
+    while (in >> id) pois.push_back(id);
+  }
+  std::printf("design: %d nodes, %zu directed arcs, %zu POIs; cap %.0f, "
+              "hub cost %.0f, cable cost %.2f/m\n",
+              g.num_nodes, g.arcs.size(), pois.size(), p.edge_cap, p.hub_cost,
+              p.cable_cost_per_m);
+  const arcedge::DesignResult res = arcedge::design(g, pois, p);
+  if (!res.feasible) {
+    std::fprintf(stderr, "design infeasible: POIs disconnected or capacity too tight\n");
+    return 1;
+  }
+  std::printf("design result: hubs %d (cost %.0f) + cable %.0f m (cost %.0f)\n"
+              "TOTAL COST %.0f\n",
+              res.hubs, res.hub_cost, res.cable_m, res.cable_cost, res.total_cost);
+  if (!result_path.empty()) {
+    std::ofstream out(result_path);
+    out << "hubs " << res.hubs << "\ncable_m " << res.cable_m << "\nhub_cost "
+        << res.hub_cost << "\ncable_cost " << res.cable_cost << "\ntotal_cost "
+        << res.total_cost << "\n";
+    out << "hub_nodes";
+    for (int32_t h : res.hub_nodes) out << ' ' << h;
+    out << "\n";
+  }
+  return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
   try {
     if (argc >= 2 && std::strcmp(argv[1], "gen") == 0) return run_gen(argc, argv);
     if (argc >= 2 && std::strcmp(argv[1], "solve") == 0) return run_solve(argc, argv);
+    if (argc >= 2 && std::strcmp(argv[1], "design") == 0) return run_design(argc, argv);
     usage();
     return 2;
   } catch (const std::exception& e) {
