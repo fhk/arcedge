@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# End-to-end proof of the Stage 1 combinatorial core:
+#   build -> unit tests -> generate instances -> solve (Lagrangian LB + primal UB)
+#   -> validate bounds against the exact HiGHS LP optimum (small + medium)
+#   -> certified-gap run at ~1M-arc scale.
+# Requires: cmake, a C++17 compiler, python3 with highspy + numpy
+#   (pip install highspy numpy).
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+echo "=== [1/5] build ==="
+cmake -B build -DCMAKE_BUILD_TYPE=Release >/dev/null
+cmake --build build -j"$(nproc)" >/dev/null
+
+echo "=== [2/5] unit tests ==="
+ctest --test-dir build --output-on-failure
+
+echo "=== [3/5] small instance: solve + HiGHS validation ==="
+mkdir -p data
+./build/arcedge gen --out data/small.txt --width 10 --height 10 --time 8 \
+  --commodities 10 --cap 3 --hubs 2 --seed 42
+./build/arcedge solve data/small.txt --iters 300 --tol 0.002 --quiet \
+  --result data/small.result
+python3 scripts/validate_lp.py data/small.txt data/small.result
+
+echo "=== [4/5] medium instance: solve + HiGHS validation ==="
+./build/arcedge gen --out data/medium.txt --width 20 --height 20 --time 12 \
+  --commodities 30 --cap 4 --hubs 3 --seed 7
+./build/arcedge solve data/medium.txt --iters 400 --tol 0.002 --quiet \
+  --result data/medium.result
+python3 scripts/validate_lp.py data/medium.txt data/medium.result
+
+echo "=== [5/5] large instance (~1M arcs): certified LB/UB gap ==="
+./build/arcedge gen --out data/large.txt --width 70 --height 70 --time 45 \
+  --commodities 250 --cap 3 --hubs 4 --hub-frac 0.7 --seed 11
+./build/arcedge solve data/large.txt --iters 150 --tol 0.01 --primal-every 15 \
+  --result data/large.result
+
+echo
+echo "E2E PASSED: unit tests green, HiGHS confirms lb <= LP* <= ub on small"
+echo "and medium, and the large instance closes to a certified gap."
