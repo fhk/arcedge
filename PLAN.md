@@ -421,6 +421,22 @@ buffers: 46 → ~15 ms/iter at K=2000, opening K=10k+; plus GPU wave-primal
 (R3-1d) when MCF batches grow. These matter for the flow-model side
 (time-expanded MCF, future LNS/Steiner), not for the facility chain.
 
+## Design-quality refinements (2026-07-03, later)
+
+- **Duct sharing** (`cable.reuse_factor`): upper tiers pay a fraction on and
+  are routed toward edges already carrying lower-tier cable. Full-SF −7.3%.
+- **Hub slide**: hubs with tree-degree 1 and no local demand sit on dead-leg
+  stubs ("T shapes"); re-rooting at the first junction (the splice point)
+  removes the stub with zero side effects — provably improving, unit-tested
+  on a forced-T instance, applied per tier (terminals included).
+- **Seed-diversified rounds**: converged feedback rounds repeat one basin;
+  remaining rounds now explore fresh solver seeds, best-of wins. This also
+  absorbs the ±1% basin variance that structural changes (like the slide)
+  can otherwise surface as apparent regressions.
+- Full-SF progression: 37,432,879 (greedy) → 36,839,982 (feedback) →
+  34,154,091 (sharing) → **33,737,619** (slide + diversified rounds), −9.9%
+  overall at ~16 s/round on 4 cores.
+
 ## Joint-chain benchmark (user-reported, Colab GPU-class runtime, 2026-07-03)
 
 Machine: AMD EPYC 9B45, 48 vCPU, 176 GB RAM (RTX PRO 6000 Blackwell present

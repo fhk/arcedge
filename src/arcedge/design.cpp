@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdio>
 #include <limits>
+#include <map>
 #include <mutex>
 #include <numeric>
 #include <queue>
@@ -592,6 +593,73 @@ std::vector<int32_t> recenter(const Net& net, const std::vector<int32_t>& pois,
 
 }  // namespace
 
+// Slides hubs off cable stubs. A hub with tree-degree 1 and no demand of its
+// own sits at the end of a dead-leg whose only purpose is to reach the hub
+// ("T shape": the cable branches at a junction nearby, where a splice exists
+// anyway, and a stub runs to the hub). Re-rooting the cluster tree at the
+// far end of the stub removes that edge and changes nothing else -- loads on
+// all remaining edges are unchanged and every capacity still holds -- so the
+// slide is provably improving: cable shrinks by the stub length. Repeats
+// until the hub reaches a junction (degree >= 2), a demand-carrying node, or
+// a customer leaf (never a site).
+void slide_hubs(const Net& net, const std::vector<double>& node_dem,
+                const DesignParams& p, Eval& ev) {
+  auto key = [](int32_t a, int32_t b) {
+    return (static_cast<int64_t>(std::min(a, b)) << 32) |
+           static_cast<uint32_t>(std::max(a, b));
+  };
+  std::map<int64_t, double> len_of;
+  for (size_t e = 0; e < net.elen.size(); ++e)
+    len_of[key(net.eu[e], net.ev[e])] = net.elen[e];
+
+  std::map<int32_t, std::vector<size_t>> inc;  // node -> used-edge indices
+  std::vector<char> removed(ev.used.size(), 0);
+  for (size_t i = 0; i < ev.used.size(); ++i) {
+    inc[ev.used[i].u].push_back(i);
+    inc[ev.used[i].v].push_back(i);
+  }
+  auto live_edges = [&](int32_t v) {
+    std::vector<size_t> out;
+    for (size_t i : inc[v])
+      if (!removed[i]) out.push_back(i);
+    return out;
+  };
+
+  std::map<int32_t, int32_t> moved;  // old hub node -> new hub node
+  double saved_m = 0.0;
+  for (int32_t& hub : ev.hubs) {
+    const int32_t start = hub;
+    int32_t cur = hub;
+    while (true) {
+      if (node_dem[static_cast<size_t>(cur)] > 0.0) break;
+      const std::vector<size_t> le = live_edges(cur);
+      if (le.size() != 1) break;  // junction (the splice) or isolated
+      const DesignUsedEdge& e = ev.used[le[0]];
+      const int32_t far = e.u == cur ? e.v : e.u;
+      if (net.is_poi[static_cast<size_t>(far)]) break;  // customer premises
+      removed[le[0]] = 1;
+      saved_m += len_of.count(key(e.u, e.v)) ? len_of[key(e.u, e.v)] : 0.0;
+      cur = far;
+    }
+    if (cur != start) {
+      moved[start] = cur;
+      hub = cur;
+    }
+  }
+  if (moved.empty()) return;
+  for (int32_t& h : ev.poi_hub) {
+    auto it = moved.find(h);
+    if (it != moved.end()) h = it->second;
+  }
+  std::vector<DesignUsedEdge> kept;
+  kept.reserve(ev.used.size());
+  for (size_t i = 0; i < ev.used.size(); ++i)
+    if (!removed[i]) kept.push_back(ev.used[i]);
+  ev.used = std::move(kept);
+  ev.cable_m -= saved_m;
+  ev.cost -= saved_m * p.cable_cost_per_m;
+}
+
 DesignResult design(const StreetGraph& g, const std::vector<int32_t>& pois,
                     const DesignParams& p, const std::vector<double>& demands) {
   if (pois.empty()) throw std::runtime_error("no POIs to serve");
@@ -728,6 +796,17 @@ DesignResult design(const StreetGraph& g, const std::vector<int32_t>& pois,
     run_batch({kb, kb - kb / 8, kb - 1, kb + 1, kb + kb / 8}, true);
     const int kb2 = best.feasible ? static_cast<int>(best.hubs.size()) : kb;
     if (kb2 != kb) run_batch({kb2 - 2, kb2 + 2}, true);
+  }
+
+  // Post-pass: slide hubs off dead-leg stubs onto the branch splice.
+  if (best.feasible) {
+    std::vector<double> node_dem(static_cast<size_t>(net.n), 0.0);
+    for (size_t i = 0; i < pois.size(); ++i)
+      node_dem[static_cast<size_t>(pois[i])] += dem[i];
+    const double before = best.cost;
+    slide_hubs(net, node_dem, p, best);
+    if (p.verbose && best.cost < before - 1e-9)
+      std::printf("hub slide: -%.0f (cable stubs removed)\n", before - best.cost);
   }
 
   DesignResult res;

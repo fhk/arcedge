@@ -163,18 +163,24 @@ cable from an earlier tier cost only that fraction for later tiers — and
 since the routing metric and the cable objective are the same lengths,
 upper tiers are actively *attracted* onto existing corridors.
 
-Full-city SF (54,921 Overture address points, `--rounds 3`,
+Two further refinements: **hub slide** (a hub whose cluster tree meets it
+with degree 1 and no local demand sits on a dead-leg stub — the "T shape";
+it slides onto the branch junction, where the splice lives anyway, removing
+the stub), and **seed-diversified rounds** (once feedback converges,
+remaining rounds explore fresh solver seeds; best chain wins).
+
+Full-city SF (54,921 Overture address points, `--rounds 6`,
 `reuse_factor: 0.25`):
 
-| tier | facilities | cable (physical) | reused on lower-tier duct | cost |
-|------|-----------:|------:|------:|-----:|
-| terminal (≤12) | 10,511 | 1,845 km | — | 23,708,699 |
-| FDH (≤512) | 192 | 612 km | 328 km (54%) | 7,494,333 |
-| OLT (≤4000) | 26 | 119 km | 111 km (94%) | 2,951,060 |
-| **chain total** | | 2,576 km | | **34,154,091** (~622/address) |
+| stage | chain total |
+|-------|------------:|
+| greedy chain, no sharing | 37,432,879 |
+| + joint feedback rounds | 36,839,982 |
+| + duct sharing (0.25) | 34,154,091 |
+| + hub slide + seed-diversified rounds | **33,737,619** (~614/address, −9.9% overall) |
 
-Reference points: no sharing + joint rounds = 36,839,982; greedy chain
-without sharing = 37,432,879. Duct sharing saves a further 7.3%.
+Final: 10,511 terminals / ~200 FDHs / ~24 OLTs; upper tiers run 54–94% of
+their length on lower-tier duct.
 
 Wall-clock for all three rounds: **~45 s on a 4-core box** after the R3-2b
 serial-path optimizations (subtree load aggregation + incremental forest

@@ -274,6 +274,38 @@ static void test_design_hub_capacity() {
   for (double s : served_check) CHECK(s <= 2.0 + 1e-9);
 }
 
+// T-shape / hub-slide: a Y junction J with POI arms to A and B, plus a
+// dead-end stub J-S whose node S sits exactly at the demand centroid -- so
+// both k-means seeding and recentering place the hub at S, leaving a 30 m
+// stub whose only purpose is to reach the hub. The slide pass must move the
+// hub onto the junction splice at J and drop the stub:
+// cable = 100 + 100 + 10 + 10 = 220, total = 20000 + 2200 = 22200 (not 22500).
+static void test_design_hub_slide() {
+  StreetGraph g;
+  g.num_nodes = 6;  // 0=J 1=A 2=B 3=S 4=poiA 5=poiB
+  g.lon = {-122.400, -122.401, -122.399, -122.400, -122.4011, -122.3989};
+  g.lat = {37.7704, 37.7700, 37.7700, 37.7700, 37.7700, 37.7700};
+  auto both = [&](int32_t u, int32_t v, double w) {
+    g.arcs.push_back({u, v, w});
+    g.arcs.push_back({v, u, w});
+  };
+  both(0, 1, 100);  // J-A
+  both(0, 2, 100);  // J-B
+  both(0, 3, 30);   // J-S (dead-end stub at the centroid)
+  both(4, 1, 10);   // drop at A
+  both(5, 2, 10);   // drop at B
+  DesignParams p;
+  p.edge_cap = 0;
+  p.hub_cost = 20000;
+  p.cable_cost_per_m = 10;
+  p.verbose = false;
+  DesignResult res = design(g, {4, 5}, p);
+  CHECK(res.feasible);
+  CHECK(res.hubs == 1);
+  CHECK(std::abs(res.total_cost - 22200.0) < 1e-6);
+  CHECK(res.hub_nodes[0] == 0);  // slid onto the junction splice
+}
+
 int main() {
   test_dijkstra();
   test_diamond_exact();
@@ -283,6 +315,7 @@ int main() {
   test_design_single_hub();
   test_design_capacity_repair();
   test_design_hub_capacity();
+  test_design_hub_slide();
   test_dag_backend_equivalence();
   if (failures == 0) {
     std::printf("all tests passed\n");

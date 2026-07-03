@@ -398,7 +398,7 @@ def emit_design(out_dir, model, nodes, edges, edge_caps, poi_nodes,
 
 # ----------------------------------------------------------- tier chain ---
 
-def run_chain_once(out_dir, artifacts, arcedge_bin, open_adjust, tag):
+def run_chain_once(out_dir, artifacts, arcedge_bin, open_adjust, tag, seed=1):
     """One bottom-up pass over the facility tiers: each tier's opened hubs
     become the next tier's demand points (demand = units served).
     `open_adjust[i]` inflates tier i's open cost for PLACEMENT only (the
@@ -446,6 +446,7 @@ def run_chain_once(out_dir, artifacts, arcedge_bin, open_adjust, tag):
                "--cap", f"{ps['edge_cap']:g}", "--hub-cap", f"{ps['hub_cap']:g}",
                "--hub-cost", f"{eff_open:g}",
                "--cable-cost", f"{ps['cable_cost']:g}",
+               "--seed", str(seed),
                "--quiet", "--result", str(result), "--solution", str(solution)]
         if ps["demand_transit"]:
             cmd.append("--demand-transit")
@@ -525,18 +526,26 @@ def solve_design_chain(out_dir, artifacts, arcedge_bin, rounds=1):
     passes = artifacts["passes"]
     open_adjust = [0.0] * len(passes)
     best, best_tag, history = None, "", []
+    seed, prev_total = 1, None
     for r in range(1, max(1, rounds) + 1):
         tag = f".r{r}"
-        print(f"[chain round {r}/{rounds}]", flush=True)
+        print(f"[chain round {r}/{rounds}]"
+              + (f" (seed {seed})" if seed != 1 else ""), flush=True)
         t0 = time.monotonic()
-        s = run_chain_once(out_dir, artifacts, arcedge_bin, open_adjust, tag)
+        s = run_chain_once(out_dir, artifacts, arcedge_bin, open_adjust, tag,
+                           seed=seed)
         history.append(dict(
             round=r, total_cost=s["total_cost"], open_adjust=list(open_adjust),
-            wall_s=time.monotonic() - t0,
+            seed=seed, wall_s=time.monotonic() - t0,
             tiers=[{k: t[k] for k in ("tier", "hubs", "cable_m", "cost", "ms")}
                    for t in s["tiers"]]))
         print(f"  round {r} true total: {s['total_cost']:.0f} "
               f"({history[-1]['wall_s']:.0f} s)", flush=True)
+        # Converged feedback just repeats the same basin: spend the remaining
+        # rounds exploring other seeds instead (best-of keeps the winner).
+        if prev_total is not None and abs(s["total_cost"] - prev_total) < 1e-6:
+            seed += 1
+        prev_total = s["total_cost"]
         if best is None or s["total_cost"] < best["total_cost"]:
             best, best_tag = s, tag
         # Feedback: marginal upper-tier cable COST per facility of this tier
