@@ -249,9 +249,9 @@ Notes:
 |-----------|--------|----------|
 | S2-M0 CPU DAG level-sweep backend | **done** | `--sp-backend dag`: bit-equal LB/UB with Dijkstra on the SF 1.7M-arc instance (lb 1390235.88, ub 1399750.63, 21 iters both) and already 1.26× faster on 4 CPU cores (7.9 s vs 10.0 s); unit equivalence test in `ctest` |
 | S2-M1 CUDA backend | **ACCEPTED** (Colab, RTX PRO 6000 Blackwell Server, 2026-07-03) | See "S2-M1 acceptance evidence" below |
-| S2-M2 LNS for design mode | next | — |
-| S2-M3 LNS for MCF | pending | — |
-| S2-M4 Steiner/PCST bounds | pending | — |
+| S2-M2 LNS for design mode | re-scoped as optional anytime tail — see Round 3 replan | — |
+| S2-M3 LNS for MCF | re-scoped — see Round 3 replan | — |
+| S2-M4 Steiner/PCST bounds | deferred (design-mode certified gaps are not currently worth their cost — see learnings) | — |
 
 ### S2-M1 acceptance evidence
 
@@ -292,6 +292,63 @@ constraint again: keep λ and the subgradient update on-device (skip the
 cost upload), CUDA Graphs for the level-launch sequence, pinned host
 buffers. Earlier T4 profiling already moved path/load extraction on-device
 (0.5 GB → 6.7 MB per iteration over PCIe).
+
+---
+
+# Round 3: speed-first replan (2026-07-03)
+
+Directive: **trade gap % for wall-clock where the exchange rate is good** —
+an order-of-magnitude speedup is worth a point of gap. The evidence from
+Stage 1 + S2-M0/M1 says this trade is not only acceptable, it is nearly free:
+the expensive part of our solves is the *upper bound*, while the lower bound
+(dual iterations) is now almost costless on GPU. Certified gaps can stay; the
+machinery producing them just needs to stop being on the critical path.
+
+## What we learned (evidence)
+
+1. **The sequential primal heuristic dominates solve time — and is often
+   pure waste.** Measured on the SF TE instance (4-core CPU, dag backend,
+   identical iteration counts): K=150: 11.7 s with primal vs 5.65 s without
+   (**52% primal**). K=1000, 5 iterations: 20.1 s vs 8.7 s (**57% primal**)
+   — and those primal calls returned *no feasible solution* (UB = inf: with
+   cold multipliers, both routing passes fail on congested instances). On
+   GPU the share is worse because the dual side got 5× cheaper.
+2. **The dual bound is nearly free and nearly instant.** Iteration-0
+   (free-flow) LB is within ~1% of optimum on every real-data instance so
+   far; the GPU does a K=2000 dual iteration in 46 ms, flat in K
+   (fixed overheads dominate — S2-M1 evidence table).
+3. **Quality is not the bottleneck.** Every validated instance closed to
+   ≤1% (most ≤0.7%, some 0.0%); the design heuristic beats 120–240 s HiGHS
+   MIP incumbents in 0.3 s. We have gap headroom to spend.
+4. **Design-mode certified gaps are bad value.** The fixed-charge LP/MIP
+   dual bound sits ~30% below the heuristic (both ours and HiGHS's own
+   incumbents) — closing it costs minutes for information that doesn't
+   change decisions. Keep exact references in the validation suite only.
+5. **Design runtime is dominated by avoidable work**: the k-sweep probes
+   k=1..32 which are infeasible and burn the full 800-round repair limit
+   (each round = one multi-source Dijkstra over 107k nodes, opening ONE
+   relief hub); evaluations are independent but run sequentially; SPH
+   clusters are edge-disjoint but consolidated sequentially.
+6. **Cross-backend/trajectory diversity tightens bounds for free**
+   (FP32 tie-breaking found a 0.287% solution where FP64 found 0.68%).
+   Restarts/perturbation are cheap ensemble members on GPU.
+7. Real street graphs have low-degree cuts: infeasibility is a normal
+   outcome and must fail fast (divergence detector currently spends 30+
+   iterations to say so).
+
+## Round 3 milestones (speed-first)
+
+| # | Deliverable | Expected effect | Target |
+|---|-------------|-----------------|--------|
+| R3-1 | **Primal overhaul.** (a) Skip the primal until multipliers are warm (LB stall or iteration threshold) — cold-λ routing is measured waste. (b) Drop the pure-cost pass once λ is warm (guided pass wins in practice; halves remaining cost). (c) Parallelize routing: wave-based batch SSP — route all commodities on the GPU/thread batch against current residuals with penalty re-pricing, few rounds, CPU repair only for the overloaded tail. (d) Once cheap, refresh every iteration → earlier stopping. | Removes the 52–57% primal share; UB appears earlier so fewer dual iterations too | SF K=150 full solve **< 1 s** GPU / < 3 s CPU; K=1000 **< 10 s** GPU (vs ~minutes today) |
+| R3-2 | **Design speed pass.** (a) Batch relief: open relief hubs at *every* overloaded funnel per repair round, not one — repair rounds drop from ~hundreds to ~5–10. (b) Estimate k_min from demand/capacity before sweeping; never probe hopeless k. (c) Evaluate candidate k's in parallel threads. (d) Parallelize SPH across (edge-disjoint) clusters. | Removes the dominant known wastes in the 3–4 min full-SF run | full-SF design (54,921 POIs) **< 30 s** at equal-or-better cost |
+| R3-3 | **GPU iteration floor.** Device-resident λ + subgradient update (kills the 7 MB/iter upload), CUDA Graphs for the ~35 per-level launches, pinned buffers. | 46 → ~15–20 ms/iter at K=2000; opens K=10k+ | K=10,000 dual iteration ≤ ~60 ms |
+| R3-4 | **Anytime interface.** `--budget SECONDS`: solvers return best-known solution + certified gap when the budget expires; gap tolerance becomes advisory. Fast-fail infeasibility check (aggregate demand vs cut capacity heuristics) before iterating. | Product knob matching the directive: speed is chosen, gap is reported | any instance returns a usable answer within budget |
+| R3-5 | **Quality tail (was S2-M2/M3), now opt-in.** LNS with warm-started HiGHS sub-MIPs over design clusters / MCF time-windows, run only inside a leftover budget. Trajectory-ensemble restarts on GPU as a cheap alternative knob. | Recovers gap when the user *chooses* to spend time | design: measurable cost reduction per budget-minute |
+| R3-6 | **Measurement guardrails** (unchanged prerequisites): portable RNG (cross-platform instances), CI on Linux, benchmark-suite runner with per-commit results. | Makes the above speedups provable and regression-proof | suite runs green in CI |
+
+Sequencing: R3-1 and R3-2 first (largest measured waste, no new
+infrastructure), then R3-4 (small), R3-3 (GPU), R3-5/R3-6 alongside.
 
 ## Platform validation
 
