@@ -346,9 +346,11 @@ machinery producing them just needs to stop being on the critical path.
 | R3-4 | **Anytime interface.** `--budget SECONDS`: solvers return best-known solution + certified gap when the budget expires; gap tolerance becomes advisory. Fast-fail infeasibility check (aggregate demand vs cut capacity heuristics) before iterating. | Product knob matching the directive: speed is chosen, gap is reported | any instance returns a usable answer within budget |
 | R3-5 | **Quality tail (was S2-M2/M3), now opt-in.** LNS with warm-started HiGHS sub-MIPs over design clusters / MCF time-windows, run only inside a leftover budget. Trajectory-ensemble restarts on GPU as a cheap alternative knob. | Recovers gap when the user *chooses* to spend time | design: measurable cost reduction per budget-minute |
 | R3-6 | **Measurement guardrails** (unchanged prerequisites): portable RNG (cross-platform instances), CI on Linux, benchmark-suite runner with per-commit results. | Makes the above speedups provable and regression-proof | suite runs green in CI |
+| R3-7 | **Model config file** — declarative network models: layers + inter-layer couplings, selector-based capacities on edges/nodes/facilities (hard and **soft with overage penalties**), facility tiers, commodity source/sink relationships (pairs / assignment-to-facility / OD matrix), elastic demand, declarative time expansion, provenance-mapped exports. Full design spec: **`docs/model-config.md`** (phases R3-7a–d) | New problem shapes without new C++ entry points; soft capacities eliminate the hard-infeasibility failure mode on real street graphs | R3-7a compiler reproduces today's SF design + TE-MCF runs from two example configs |
 
 Sequencing: R3-1 and R3-2 first (largest measured waste, no new
-infrastructure), then R3-4 (small), R3-3 (GPU), R3-5/R3-6 alongside.
+infrastructure), then R3-4 (small) and R3-7a (schema + compiler skeleton,
+pairs well with R3-4's fast-fail checks), R3-3 (GPU), R3-5/R3-6 alongside.
 
 ## Platform validation
 
