@@ -1,7 +1,20 @@
-# arcedge model configuration — design spec (v1 draft)
+# arcedge model configuration — design spec (v1)
 
-Status: design for Round 3 (R3-7). Nothing here is implemented yet; this
-document is the contract to build against.
+Status: **R3-7a implemented** — `scripts/arcedge_modelc.py` compiles the v1
+subset (see "Implementation phases"): one street layer, demand layers from
+CSV/GeoParquet, `nearest_edge_split` couplings, hard/soft edge capacities
+(soft compiled as overflow arcs), one facility tier → design mode,
+assignment / pairs / sampled commodities, elastic demand via
+`unserved_penalty`, declarative time expansion. Checked-in examples under
+`examples/` are exercised by E2E step 10, which asserts the compiled models
+reproduce the hand-built pipeline results. Later phases (R3-7b–d) remain
+design-only.
+
+Schema note learned in implementation: the capacity-rule selector key is
+**`where:`** (the spec originally used `on:`, which YAML 1.1 parses as the
+boolean `True`; the compiler tolerates both). Commodity sampling uses
+Python's `random.Random(seed)`, which is platform-portable — config-driven
+instances do not suffer the C++ `std::uniform_*` cross-platform divergence.
 
 ## Goals
 
@@ -76,11 +89,11 @@ selectors:
 #         penalty (piecewise-linear; optional hard ceiling `max`)
 # Node capacity = throughput cap, compiled via node splitting (in->out arc).
 capacities:
-  - on: { edges: { layer: streets } }
+  - where: { edges: { layer: streets } }
     capacity: { soft: 500, penalty_per_unit: 40, max: 800 }
-  - on: arterials
+  - where: arterials
     capacity: { soft: 1000, penalty_per_unit: 25 }
-  - on: { nodes: { layer: streets } }
+  - where: { nodes: { layer: streets } }
     capacity: { hard: 2000 }                # node throughput
 
 # ------------------------------------------------------------ facilities --

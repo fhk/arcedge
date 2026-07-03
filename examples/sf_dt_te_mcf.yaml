@@ -1,0 +1,31 @@
+# Downtown SF time-expanded multicommodity flow with SOFT capacities:
+# street edges carry 4 units per time step at base cost; overloading is
+# allowed at +500 m-equivalent per unit (compiled as parallel overflow
+# arcs), so the instance can never go hard-infeasible. Commodities are
+# sampled with the compiler's portable RNG (same config -> same instance
+# on every platform, unlike C++ std::uniform_* distributions).
+#
+#   python3 scripts/arcedge_modelc.py examples/sf_dt_te_mcf.yaml -o out/dt_mcf
+#   <then run the solve command printed by the compiler>
+model_version: 1
+name: sf-dt-te-mcf
+
+layers:
+  streets:
+    source: { file: data/sf_downtown.graph }
+
+capacities:
+  - where: { edges: { layer: streets } }
+    capacity: { soft: 4, penalty_per_unit: 500 }
+
+time_expansion:
+  steps: 12
+  wait: { cost: 0.01 }
+
+commodities:
+  - name: trips
+    seed: 23
+    sampled: { count: 12, hubs: 2, hub_frac: 0.6 }
+
+objective:
+  unserved_penalty: { per_unit: 100000 }   # elastic demand: never infeasible

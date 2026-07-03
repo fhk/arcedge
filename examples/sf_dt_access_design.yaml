@@ -1,0 +1,42 @@
+# Downtown SF POI access design, expressed as a declarative model.
+# Compiles to the same problem the Stage 1 pipeline built by hand:
+# POIs drop perpendicularly onto their nearest street edge (breaking it),
+# every POI's unit demand routes to an open cabinet, street edges carry at
+# most 500 units, each cabinet costs 20,000, cable costs 10/m of edge used.
+#
+#   python3 scripts/arcedge_modelc.py examples/sf_dt_access_design.yaml -o out/dt_design
+#   <then run the design command printed by the compiler>
+#
+# Expected: ~392,123 total cost (1 hub, ~37.2 km cable).
+model_version: 1
+name: sf-dt-access-design
+
+layers:
+  streets:
+    source: { file: data/sf_downtown.graph }
+  pois:
+    source: { csv: examples/sf_dt_pois.csv }
+    role: terminals
+
+couplings:
+  - name: drops
+    from: pois
+    to: streets
+    method: nearest_edge_split
+    snap_m: 0.5
+
+capacities:
+  - where: { edges: { layer: "*" } }
+    capacity: { hard: 500 }
+
+facilities:
+  cabinet:
+    sites: { nodes: { layer: streets } }
+    open_cost: 20000
+
+cable:
+  fixed_cost_per_m: 10
+
+commodities:
+  - name: poi_service
+    assignment: { from: { nodes: { layer: pois } }, demand: 1, tier: cabinet }

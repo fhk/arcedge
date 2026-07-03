@@ -107,6 +107,28 @@ Results with capacity 500, hub cost 20,000, cable cost 10/m:
 (Full-city cable = 1,131 km of mandatory POI drops + ~1,021 km of shared
 street cable, 49 % of the 2,102 km street network.)
 
+## Declarative model config
+
+Network models can be specified in YAML and compiled to solver inputs by
+`scripts/arcedge_modelc.py` — layers, POI-drop couplings, selector-based
+edge capacities (hard, or **soft** with per-unit overage penalties compiled
+as overflow arcs), a facility tier, commodity source/sink relationships
+(explicit pairs, assignment-to-facility, portable-RNG sampling), elastic
+demand, and declarative time expansion. Spec: `docs/model-config.md`.
+
+```bash
+pip install pyyaml
+python3 scripts/arcedge_modelc.py examples/sf_dt_access_design.yaml -o out/dt_design
+python3 scripts/arcedge_modelc.py examples/sf_dt_te_mcf.yaml -o out/dt_mcf
+# each prints the arcedge command to solve the compiled model
+```
+
+The two checked-in examples reproduce the hand-built pipelines (E2E step 10
+asserts it): the design config lands on the 392,123 downtown baseline, and
+the soft-capacity MCF config closes to ~0% gap — and can never go
+hard-infeasible, because overloads cost penalty instead of killing the
+instance.
+
 ## Solution output: GeoParquet
 
 Both solvers export their solutions, and
