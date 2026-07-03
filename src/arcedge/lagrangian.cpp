@@ -89,17 +89,25 @@ SolveResult solve(const Instance& inst, const SolveOptions& opt) {
   res.best_lb = -kInf;
   res.best_ub = kInf;
   // Runs the primal heuristic and keeps the flow behind every UB improvement.
-  auto refresh_ub = [&](const std::vector<double>& lam) {
+  // The pure-cost companion pass only runs while lambda is cold (first
+  // attempt); warm-lambda guided routing wins in practice.
+  bool primal_attempted = false;
+  int primal_backoff = 1;   // doubles after fully-failed attempts
+  int next_attempt_iter = 0;
+  auto refresh_ub = [&](const std::vector<double>& lam, bool cold_lambda) {
     std::vector<double> flow;
-    const double ub = primal_heuristic(inst, g, lam, &flow);
+    const double ub =
+        primal_heuristic(inst, g, lam, opt.threads, cold_lambda, &flow);
+    primal_attempted = true;
     if (ub < res.best_ub) {
       res.best_ub = ub;
       res.flow = std::move(flow);
     }
+    // A failed attempt on a hard instance predicts more failures: back off
+    // exponentially instead of paying for routing that cannot succeed yet.
+    if (ub >= kInf && res.best_ub >= kInf) primal_backoff *= 2;
+    else primal_backoff = 1;
   };
-  if (opt.primal) refresh_ub(lambda);
-  if (opt.verbose && opt.primal)
-    std::printf("initial primal ub = %.4f\n", res.best_ub);
 
   double alpha = opt.alpha0;
   int no_improve = 0;
@@ -161,7 +169,19 @@ SolveResult solve(const Instance& inst, const SolveOptions& opt) {
           load[static_cast<size_t>(a)] += inst.commodities[k].demand;
     }
 
-    if (opt.primal && iter % opt.primal_every == 0) refresh_ub(lambda);
+    // Cold-lambda routing on a congested instance is measured waste (the
+    // passes fail outright), so the first attempt waits until either the
+    // congestion is mild or the multipliers have had a chance to warm up.
+    if (opt.primal && iter % opt.primal_every == 0 && iter >= next_attempt_iter) {
+      double overload = 0.0;
+      for (size_t a = 0; a < m; ++a)
+        if (inst.arcs[a].capacitated() && inst.arcs[a].cap > 0.0)
+          overload = std::max(overload, load[a] / inst.arcs[a].cap);
+      if (primal_attempted || iter > 0 || overload <= 3.0) {
+        refresh_ub(lambda, iter == 0);
+        next_attempt_iter = iter + opt.primal_every * primal_backoff;
+      }
+    }
 
     res.gap = (res.best_ub > 0 && res.best_ub < kInf)
                   ? (res.best_ub - res.best_lb) / res.best_ub
@@ -228,7 +248,7 @@ SolveResult solve(const Instance& inst, const SolveOptions& opt) {
 #endif
 
   // Final primal refresh with the last multipliers.
-  if (opt.primal) refresh_ub(lambda);
+  if (opt.primal && res.gap > opt.gap_tol) refresh_ub(lambda, false);
   res.gap = (res.best_ub > 0 && res.best_ub < kInf)
                 ? (res.best_ub - res.best_lb) / res.best_ub
                 : kInf;

@@ -13,6 +13,7 @@ struct DesignParams {
   double cable_cost_per_m = 10.0;  // fixed cost per meter of edge used
   unsigned seed = 1;
   int max_k = 0;                   // 0 = derive from POI count
+  int threads = 0;                 // 0 = hardware concurrency
   bool verbose = true;
 };
 
@@ -28,6 +29,7 @@ struct DesignResult {
   double cable_cost = 0.0;
   double total_cost = 0.0;
   bool feasible = false;
+  double millis = 0.0;
   std::vector<int32_t> hub_nodes;
   std::vector<DesignUsedEdge> used_edges;  // every edge carrying flow
   std::vector<int32_t> poi_hub;            // serving hub per input POI

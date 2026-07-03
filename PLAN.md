@@ -352,6 +352,35 @@ Sequencing: R3-1 and R3-2 first (largest measured waste, no new
 infrastructure), then R3-4 (small) and R3-7a (schema + compiler skeleton,
 pairs well with R3-4's fast-fail checks), R3-3 (GPU), R3-5/R3-6 alongside.
 
+## R3-1 / R3-2 results (implemented, measured on the 4-core container)
+
+**R3-1 primal overhaul** — warm-λ gating (no attempt while congestion is
+heavy and multipliers cold), pure-cost pass only on cold λ, wave-parallel
+successive shortest paths (parallel batch SSSP on a frozen residual
+snapshot + deterministic sequential commit), escalating congestion pricing
+(β·λ retries on failure), exponential backoff after fully-failed attempts.
+
+| Benchmark | Before | After | |
+|---|---:|---:|---|
+| SF K=150 full solve (dag, 21 iters, gap 0.68%) | 11.7 s | **6.25 s** | 1.9×; the residual 5.65 s is the dual side — next cuts come from GPU (R3-3) or fewer iterations |
+| SF K=1000, hard cap 20 | UB never found; ~57% of time burned on failing primal calls | failed attempts now back off exponentially | greedy routing cannot serve this congestion under HARD caps — the modeling answer is soft capacities (next row) |
+| SF K=1000, **soft** cap 20 (+200/unit overage, via the R3-7a compiler; 4.2M arcs incl. overflow) | hard-cap version: minutes, no solution ever | **0.50% gap, 11 iters, 32 s CPU** | soft capacities turn the pathological case into a routine solve — validates the R3-7 default recommendation |
+
+**R3-2 design speed pass** — batched tempered relief (¼ of overload-maximal
+funnels per round, overloaded-ancestor filter, ~15 forest rebuilds per eval
+instead of hundreds), parallel cheap k-sweep with per-k deterministic RNG,
+cheap descent on k before spending SPH, greedy hub-prune pass, SPH
+consolidation parallel across (edge-disjoint) clusters.
+
+| Benchmark | Before | After |
+|---|---:|---:|
+| Full-SF design, 54,921 POIs | ~213 s, cost 24,620,259 (155 hubs) | **25.2 s, cost 24,928,040 (169 hubs)** — 8.5× faster, +1.25% cost (inside the speed-first trade) |
+
+Learned during implementation: naive all-at-once relief exploded hub counts
+(451 at k=64) — relief batches must be tempered and overload-maximal, and a
+prune pass recovers the parsimony that one-hub-per-round bought with its
+hundreds of rebuilds.
+
 ## Platform validation
 
 | Platform | Status |

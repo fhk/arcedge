@@ -129,6 +129,7 @@ int run_design(int argc, char** argv) {
     else if (arg_match(argc, argv, i, "--hub-cost", v)) p.hub_cost = std::stod(v);
     else if (arg_match(argc, argv, i, "--cable-cost", v)) p.cable_cost_per_m = std::stod(v);
     else if (arg_match(argc, argv, i, "--max-k", v)) p.max_k = std::stoi(v);
+    else if (arg_match(argc, argv, i, "--threads", v)) p.threads = std::stoi(v);
     else if (arg_match(argc, argv, i, "--seed", v)) p.seed = static_cast<unsigned>(std::stoul(v));
     else if (arg_match(argc, argv, i, "--result", v)) result_path = v;
     else if (std::strcmp(argv[i], "--quiet") == 0) p.verbose = false;
@@ -153,8 +154,9 @@ int run_design(int argc, char** argv) {
     return 1;
   }
   std::printf("design result: hubs %d (cost %.0f) + cable %.0f m (cost %.0f)\n"
-              "TOTAL COST %.0f\n",
-              res.hubs, res.hub_cost, res.cable_m, res.cable_cost, res.total_cost);
+              "TOTAL COST %.0f  (time %.0f ms)\n",
+              res.hubs, res.hub_cost, res.cable_m, res.cable_cost,
+              res.total_cost, res.millis);
   if (!result_path.empty()) {
     std::ofstream out(result_path);
     out << std::setprecision(15);

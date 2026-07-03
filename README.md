@@ -99,10 +99,10 @@ python3 scripts/connect_pois.py data/sf_streets.graph places_sf.parquet data/sf_
 
 Results with capacity 500, hub cost 20,000, cable cost 10/m:
 
-| Instance | POIs | Hubs | Cable | Total cost | Reference |
-|----------|-----:|-----:|------:|-----------:|-----------|
-| SF downtown crop | 400 | 1 | 37,212 m | **392,123** | beats the 240 s HiGHS MIP incumbent (397,618); ≥ its dual bound ✓ |
-| SF full city | 54,921 | 155 | 2,152,026 m | **24,620,259** | hubs 3.10 M + cable 21.52 M |
+| Instance | POIs | Hubs | Cable | Total cost | Time | Reference |
+|----------|-----:|-----:|------:|-----------:|-----:|-----------|
+| SF downtown crop | 400 | 1 | 37,212 m | **392,123** | 0.3 s | beats the 240 s HiGHS MIP incumbent (397,618); ≥ its dual bound ✓ |
+| SF full city | 54,921 | 169 | 2,154,804 m | **24,928,040** | **25 s** | Round-3 speed pass: 8.5× faster than the Stage 1 run (213 s / 24,620,259 / 155 hubs) at +1.25% cost |
 
 (Full-city cable = 1,131 km of mandatory POI drops + ~1,021 km of shared
 street cable, 49 % of the 2,102 km street network.)
