@@ -87,8 +87,8 @@ SolveResult solve(const Instance& inst, const SolveOptions& opt) {
 
   SolveResult res;
   res.best_lb = -kInf;
-  res.best_ub = primal_heuristic(inst, g, lambda);  // lambda = 0 warm start
-  if (opt.verbose)
+  res.best_ub = opt.primal ? primal_heuristic(inst, g, lambda) : kInf;
+  if (opt.verbose && opt.primal)
     std::printf("initial primal ub = %.4f\n", res.best_ub);
 
   double alpha = opt.alpha0;
@@ -134,7 +134,7 @@ SolveResult solve(const Instance& inst, const SolveOptions& opt) {
     // An unbounded Lagrangian dual certifies primal infeasibility. If no
     // feasible flow has been found and the bound has blown far past the
     // free-flow cost, stop and say so instead of stepping forever.
-    if (res.best_ub >= kInf && iter >= 30 &&
+    if (opt.primal && res.best_ub >= kInf && iter >= 30 &&
         res.best_lb > 20.0 * std::abs(lb_free_flow) + 1.0) {
       std::fprintf(stderr,
                    "dual bound diverging (%.4g vs free-flow %.4g) with no feasible "
@@ -151,7 +151,7 @@ SolveResult solve(const Instance& inst, const SolveOptions& opt) {
           load[static_cast<size_t>(a)] += inst.commodities[k].demand;
     }
 
-    if (iter % opt.primal_every == 0)
+    if (opt.primal && iter % opt.primal_every == 0)
       res.best_ub = std::min(res.best_ub, primal_heuristic(inst, g, lambda));
 
     res.gap = (res.best_ub > 0 && res.best_ub < kInf)
@@ -197,7 +197,9 @@ SolveResult solve(const Instance& inst, const SolveOptions& opt) {
   // certified bound (rounding could overestimate a distance sum). Re-evaluate
   // L(lambda) at the best multipliers in FP64 on the CPU: any lambda >= 0
   // gives a valid bound, so the certified value replaces the FP32 one.
-  if (cuda_engine && !lambda_at_best_lb.empty()) {
+  // Skipped in --no-primal benchmark mode: it costs one CPU-batch iteration,
+  // which would distort pure SSSP throughput comparisons.
+  if (opt.primal && cuda_engine && !lambda_at_best_lb.empty()) {
     for (size_t a = 0; a < m; ++a)
       reduced[a] = inst.arcs[a].cost + lambda_at_best_lb[a];
     batched_shortest_paths(inst, g, &dag, reduced, opt.threads, dists, paths);
@@ -214,7 +216,8 @@ SolveResult solve(const Instance& inst, const SolveOptions& opt) {
 #endif
 
   // Final primal refresh with the last multipliers.
-  res.best_ub = std::min(res.best_ub, primal_heuristic(inst, g, lambda));
+  if (opt.primal)
+    res.best_ub = std::min(res.best_ub, primal_heuristic(inst, g, lambda));
   res.gap = (res.best_ub > 0 && res.best_ub < kInf)
                 ? (res.best_ub - res.best_lb) / res.best_ub
                 : kInf;

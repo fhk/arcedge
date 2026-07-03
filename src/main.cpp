@@ -83,6 +83,7 @@ int run_solve(int argc, char** argv) {
     else if (arg_match(argc, argv, i, "--sp-backend", v)) opt.sp_backend = v;
     else if (arg_match(argc, argv, i, "--result", v)) result_path = v;
     else if (std::strcmp(argv[i], "--quiet") == 0) opt.verbose = false;
+    else if (std::strcmp(argv[i], "--no-primal") == 0) opt.primal = false;
     else { std::fprintf(stderr, "unknown option: %s\n", argv[i]); return 2; }
   }
   const arcedge::Instance inst = arcedge::Instance::load(inst_path);

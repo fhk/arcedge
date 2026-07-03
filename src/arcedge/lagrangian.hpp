@@ -15,6 +15,10 @@ struct SolveOptions {
   double alpha0 = 1.5;      // initial Polyak step scale, halved on stalls
   int stall_iters = 15;     // halve alpha after this many non-improving iters
   bool verbose = true;
+  // Skip the primal heuristic entirely (no upper bound, fixed iteration
+  // count). For benchmarking the SSSP subproblem: the heuristic is
+  // sequential CPU work that would otherwise dominate large-batch timings.
+  bool primal = true;
   // Shortest-path subproblem backend: "auto" (dijkstra), "dijkstra"
   // (per-commodity binary-heap, CPU threads), "dag" (topological level sweep,
   // CPU threads -- the GPU kernel's structure, exact on time-expanded DAGs),
