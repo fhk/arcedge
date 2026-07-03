@@ -248,15 +248,50 @@ Notes:
 | Milestone | Status | Evidence |
 |-----------|--------|----------|
 | S2-M0 CPU DAG level-sweep backend | **done** | `--sp-backend dag`: bit-equal LB/UB with Dijkstra on the SF 1.7M-arc instance (lb 1390235.88, ub 1399750.63, 21 iters both) and already 1.26× faster on 4 CPU cores (7.9 s vs 10.0 s); unit equivalence test in `ctest` |
-| S2-M1 CUDA backend | **validated on Colab T4**; readback optimization landed, needs re-run | First T4 run: FP32 LB within 3e-8 of FP64 (1390235.835 vs .880), solve reached 0.287% gap in 3.15 s vs 3.40 s CPU-dag on the same box. Profiling insight: the per-iteration K×N packed readback (~0.5 GB over PCIe) dominated — now replaced by device-side path walking (loads accumulated on GPU, ~6.7 MB back per iteration) plus FP64 re-certification of the final LB at the best multipliers |
+| S2-M1 CUDA backend | **ACCEPTED** (Colab, RTX PRO 6000 Blackwell Server, 2026-07-03) | See "S2-M1 acceptance evidence" below |
 | S2-M2 LNS for design mode | next | — |
 | S2-M3 LNS for MCF | pending | — |
 | S2-M4 Steiner/PCST bounds | pending | — |
 
-Known S2-M1 caveats to close on GPU hardware: FP32 LB needs a final FP64
-re-evaluation of L(λ) for a certified bound; path/load extraction currently
-copies the packed array back per iteration (device-side extraction is the
-follow-up optimization).
+### S2-M1 acceptance evidence
+
+Measured via `notebooks/arcedge_s2m1_benchmark.ipynb` on Colab,
+NVIDIA RTX PRO 6000 Blackwell Server Edition (earlier validation on T4).
+
+**Full solve, SF 1.68M-arc TE instance, K=150** (includes the sequential CPU
+primal heuristic):
+
+| backend | gap | iters | time |
+|---|---:|---:|---:|
+| dijkstra (CPU) | 0.680% | 21 | 3507 ms |
+| dag (CPU) | 0.680% | 21 | 3367 ms |
+| cuda | **0.287%** | 11 | **2705 ms** |
+
+CPU backends bit-equal; cuda's tighter gap is a legitimately different
+multiplier trajectory (FP32 tie-breaking) whose λ-guided heuristic found a
+better feasible flow; final LB FP64-certified. Pooling backends gives a
+combined certified interval of 0.287%.
+
+**Pure batched-SSSP throughput (`--no-primal`), ms per subgradient iteration:**
+
+| K | dag (CPU) | cuda | speedup |
+|---:|---:|---:|---:|
+| 100 | 7 | 23 | 0.31x |
+| 250 | 9 | 22 | 0.39x |
+| 500 | 72 | 34 | 2.09x |
+| 1000 | 128 | 38 | 3.37x |
+| 2000 | 249 | 46 | 5.42x |
+
+Crossover at K≈400; margin grows monotonically with K (the acceptance
+criterion). The cuda curve is nearly flat (23→46 ms/iter across a 20×
+batch increase): per-iteration cost is dominated by fixed overheads (7 MB
+reduced-cost upload, ~35 per-level kernel launches, 6.7 MB loads readback),
+so the GPU has large headroom — K in the tens of thousands should hold
+similar ms/iter. Follow-up optimizations when SSSP becomes the binding
+constraint again: keep λ and the subgradient update on-device (skip the
+cost upload), CUDA Graphs for the level-launch sequence, pinned host
+buffers. Earlier T4 profiling already moved path/load extraction on-device
+(0.5 GB → 6.7 MB per iteration over PCIe).
 
 ## Platform validation
 
