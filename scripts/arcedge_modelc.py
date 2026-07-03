@@ -328,37 +328,126 @@ def emit_mcf(out_dir, model, nodes, edges, edge_caps, report):
             "solve": f"./build/arcedge solve {inst} --tol 0.01"}
 
 
-def emit_design(out_dir, model, nodes, edges, edge_caps, poi_nodes, report):
-    tiers = model.get("facilities", {})
-    if len(tiers) != 1:
-        fail("v1 supports exactly one facility tier for design mode")
-    (tier_name, tier), = tiers.items()
-    caps = {edge_caps[i]["cap"] for i in edge_caps
-            if edge_caps[i]["kind"] == "hard"}
+def resolve_design_edge_cap(edge_caps):
+    """Uniform hard edge capacity from the rules; 0 = uncapacitated."""
     kinds = {edge_caps[i]["kind"] for i in edge_caps}
-    if kinds - {"hard"}:
+    if kinds == {"none"} or not kinds:
+        return 0.0
+    if kinds - {"hard", "none"}:
         fail("v1 design mode needs uniform HARD edge capacities "
              "(soft-capacity design lands with R3-7c)")
-    if len(caps) != 1:
+    caps = {edge_caps[i]["cap"] for i in edge_caps
+            if edge_caps[i]["kind"] == "hard"}
+    if len(caps) != 1 or "none" in kinds:
         fail(f"v1 design mode needs one uniform edge capacity, got {caps}")
+    return caps.pop()
+
+
+def emit_design(out_dir, model, nodes, edges, edge_caps, poi_nodes,
+                poi_demands, report):
+    """One or more facility tiers. Tier order = declaration order; each tier
+    serves the previous tier's opened facilities (demand = units served),
+    starting from the coupled demand points. Multi-tier solving is chained
+    single-tier passes (spec R3-7d approximation), driven by --solve."""
+    tiers = model.get("facilities", {})
+    if not tiers:
+        fail("design mode needs at least one facility tier")
+    default_edge_cap = resolve_design_edge_cap(edge_caps)
     cable_cost = float((model.get("cable") or {}).get("fixed_cost_per_m", 10.0))
 
     graph = out_dir / "access.graph"
-    pois = out_dir / "access.pois"
+    pois = out_dir / "tier0.pois"
     write_street_graph(graph, nodes, edges)
     with open(pois, "w") as f:
-        for n in poi_nodes:
-            f.write(f"{n}\n")
+        for n, q in zip(poi_nodes, poi_demands):
+            f.write(f"{n} {q:g}\n")
 
-    params = dict(cap=caps.pop(), hub_cost=float(tier["open_cost"]),
-                  cable_cost=cable_cost)
+    passes = []
+    for i, (tier_name, tier) in enumerate(tiers.items()):
+        cap_spec = tier.get("capacity", {})
+        edge_cap = tier.get("edge_capacity", {}).get(
+            "hard", default_edge_cap if i == 0 else 0.0)
+        passes.append({
+            "tier": tier_name,
+            "hub_cost": float(tier["open_cost"]),
+            "hub_cap": float(cap_spec.get("hard", 0)),
+            "edge_cap": float(edge_cap),
+            "cable_cost": float(tier.get("cable_cost_per_m", cable_cost)),
+            "demand_transit": i > 0,  # upper tiers sit on street cabinets
+        })
+
     report.update(mode="design", nodes=len(nodes), undirected_edges=len(edges),
-                  pois=len(poi_nodes), facility_tier=tier_name, **params)
+                  pois=len(poi_nodes), tiers=[p["tier"] for p in passes])
+    t0 = passes[0]
     cmd = (f"./build/arcedge design --graph {graph} --pois {pois} "
-           f"--cap {params['cap']:g} --hub-cost {params['hub_cost']:g} "
-           f"--cable-cost {params['cable_cost']:g}")
-    return {"graph": str(graph), "pois": str(pois), "params": params,
+           f"--cap {t0['edge_cap']:g} --hub-cap {t0['hub_cap']:g} "
+           f"--hub-cost {t0['hub_cost']:g} --cable-cost {t0['cable_cost']:g}")
+    if len(passes) > 1:
+        cmd += "   # tier 1 of {}; use --solve to run the whole chain".format(
+            len(passes))
+    return {"graph": str(graph), "pois": str(pois), "passes": passes,
             "design": cmd}
+
+
+# ----------------------------------------------------------- tier chain ---
+
+def solve_design_chain(out_dir, artifacts, arcedge_bin):
+    """Runs the facility tiers bottom-up: each pass's opened hubs become the
+    next pass's demand points (demand = units served)."""
+    import subprocess
+    graph = artifacts["graph"]
+    pois_path = artifacts["pois"]
+    passes = artifacts["passes"]
+    summary = {"tiers": [], "total_cost": 0.0}
+    for i, ps in enumerate(passes):
+        result = out_dir / f"tier{i + 1}.result"
+        solution = out_dir / f"tier{i + 1}.solution"
+        cmd = [arcedge_bin, "design", "--graph", str(graph),
+               "--pois", str(pois_path),
+               "--cap", f"{ps['edge_cap']:g}", "--hub-cap", f"{ps['hub_cap']:g}",
+               "--hub-cost", f"{ps['hub_cost']:g}",
+               "--cable-cost", f"{ps['cable_cost']:g}",
+               "--quiet", "--result", str(result), "--solution", str(solution)]
+        if ps["demand_transit"]:
+            cmd.append("--demand-transit")
+        print(f"[tier {i + 1}/{len(passes)}: {ps['tier']}] "
+              f"hub_cap {ps['hub_cap']:g}, open {ps['hub_cost']:g}", flush=True)
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        if proc.returncode != 0:
+            print(proc.stdout + proc.stderr, file=sys.stderr)
+            fail(f"tier {ps['tier']} design failed")
+        res = {k: float(v) for k, v in
+               (l.split() for l in open(result) if not l.startswith("hub_nodes"))}
+        # Demands of this pass's POIs, to weight the next tier's demand.
+        dem_of = {}
+        for line in open(pois_path):
+            parts = line.split()
+            if parts:
+                dem_of[int(parts[0])] = float(parts[1]) if len(parts) > 1 else 1.0
+        served = {}
+        for line in open(solution):
+            parts = line.split()
+            if parts and parts[0] == "p":
+                served[int(parts[2])] = served.get(int(parts[2]), 0.0) + \
+                    dem_of.get(int(parts[1]), 1.0)
+        tier_sum = dict(tier=ps["tier"], hubs=int(res["hubs"]),
+                        cable_m=res["cable_m"], cost=res["total_cost"],
+                        result=str(result), solution=str(solution))
+        summary["tiers"].append(tier_sum)
+        summary["total_cost"] += res["total_cost"]
+        print(f"  -> {tier_sum['hubs']} {ps['tier']}(s), "
+              f"{tier_sum['cable_m']:.0f} m cable, cost {tier_sum['cost']:.0f}",
+              flush=True)
+        if i + 1 < len(passes):
+            pois_path = out_dir / f"tier{i + 1}.pois"
+            with open(pois_path, "w") as f:
+                for hub, q in sorted(served.items()):
+                    f.write(f"{hub} {q:g}\n")
+    json.dump(summary, open(out_dir / "tiers_summary.json", "w"), indent=2)
+    breakdown = " + ".join(
+        "{:.0f} {}".format(t["cost"], t["tier"]) for t in summary["tiers"])
+    print("\nCHAIN TOTAL COST {:.0f}  ({})".format(summary["total_cost"], breakdown))
+    return summary
 
 
 # ---------------------------------------------------------------- main ----
@@ -388,6 +477,7 @@ def compile_model(cfg_path, out_dir):
                               "undirected_edges": len(edges)}
 
     poi_nodes = []
+    poi_demands = []
     for coup in model.get("couplings", []):
         if coup.get("method") != "nearest_edge_split":
             fail(f"v1 coupling method must be nearest_edge_split: {coup}")
@@ -409,6 +499,7 @@ def compile_model(cfg_path, out_dir):
         layer_of_edge = [dl if i in drop_edges else street_name
                          for i in range(len(edges))]
         poi_nodes = [poi_of[i] for i in sorted(poi_of)]
+        poi_demands = [pts[i][2] for i in sorted(poi_of)]
         report["coupling"] = {"from": dl, "points": len(pts),
                               "connected": len(poi_nodes),
                               "edge_splits": n_split,
@@ -425,7 +516,7 @@ def compile_model(cfg_path, out_dir):
         if not poi_nodes:
             fail("assignment commodities need a coupled terminals layer")
         artifacts = emit_design(out_dir, model, nodes, edges, edge_caps,
-                                poi_nodes, report)
+                                poi_nodes, poi_demands, report)
     else:
         artifacts = emit_mcf(out_dir, model, nodes, edges, edge_caps, report)
 
@@ -440,16 +531,31 @@ def compile_model(cfg_path, out_dir):
     for k, v in artifacts.items():
         if k in ("solve", "design"):
             print(f"  {v}")
-    return 0
+    return artifacts
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("config")
     ap.add_argument("-o", "--out", required=True, help="output directory")
+    ap.add_argument("--solve", action="store_true",
+                    help="after compiling, run the solver (multi-tier designs "
+                         "run the whole facility chain)")
+    ap.add_argument("--arcedge", default="./build/arcedge",
+                    help="path to the arcedge binary (with --solve)")
     args = ap.parse_args()
     try:
-        return compile_model(Path(args.config), Path(args.out))
+        artifacts = compile_model(Path(args.config), Path(args.out))
+        if args.solve:
+            if "passes" in artifacts:
+                solve_design_chain(Path(args.out), artifacts, args.arcedge)
+            else:
+                import subprocess
+                cmd = artifacts["solve"].split()
+                cmd[0] = args.arcedge
+                print(flush=True)
+                subprocess.run(cmd, check=True)
+        return 0
     except ModelError as e:
         print(f"model error: {e}", file=sys.stderr)
         return 1

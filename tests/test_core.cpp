@@ -238,6 +238,42 @@ static void test_dag_backend_equivalence() {
   CHECK(std::abs(r1.best_ub - r2.best_ub) < 1e-6 * std::max(1.0, r1.best_ub));
 }
 
+// Hub serving capacity. Streets 0-1-2 (100 m each); POIs 3,4 drop to node 0
+// and POIs 5,6 drop to node 2 (10 m drops). With hub_cap = 2 one hub cannot
+// serve all four units, so the design must open exactly two hubs; the
+// optimum places them at nodes 0 and 2: 2 * 20000 + 10 * 40 m = 40400.
+static void test_design_hub_capacity() {
+  StreetGraph g;
+  g.num_nodes = 7;
+  g.lon = {0, 0.001, 0.002, 0, 0, 0.002, 0.002};
+  g.lat = {37.77, 37.77, 37.77, 37.7701, 37.7702, 37.7701, 37.7702};
+  auto both = [&](int32_t u, int32_t v, double w) {
+    g.arcs.push_back({u, v, w});
+    g.arcs.push_back({v, u, w});
+  };
+  both(0, 1, 100);
+  both(1, 2, 100);
+  both(3, 0, 10);
+  both(4, 0, 10);
+  both(5, 2, 10);
+  both(6, 2, 10);
+  DesignParams p;
+  p.edge_cap = 0;  // uncapacitated edges: the hub cap must drive the split
+  p.hub_cap = 2;
+  p.hub_cost = 20000;
+  p.cable_cost_per_m = 10;
+  p.verbose = false;
+  DesignResult res = design(g, {3, 4, 5, 6}, p);
+  CHECK(res.feasible);
+  CHECK(res.hubs == 2);
+  CHECK(res.total_cost <= 40400.0 + 1e-6);
+  // Every hub's demand-weighted service must respect the cap.
+  std::vector<double> served_check(7, 0.0);
+  for (size_t i = 0; i < res.poi_hub.size(); ++i)
+    served_check[static_cast<size_t>(res.poi_hub[i])] += 1.0;
+  for (double s : served_check) CHECK(s <= 2.0 + 1e-9);
+}
+
 int main() {
   test_dijkstra();
   test_diamond_exact();
@@ -246,6 +282,7 @@ int main() {
   test_street_graph_expansion();
   test_design_single_hub();
   test_design_capacity_repair();
+  test_design_hub_capacity();
   test_dag_backend_equivalence();
   if (failures == 0) {
     std::printf("all tests passed\n");

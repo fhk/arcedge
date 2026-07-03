@@ -1,14 +1,20 @@
 # arcedge model configuration — design spec (v1)
 
-Status: **R3-7a implemented** — `scripts/arcedge_modelc.py` compiles the v1
-subset (see "Implementation phases"): one street layer, demand layers from
-CSV/GeoParquet, `nearest_edge_split` couplings, hard/soft edge capacities
-(soft compiled as overflow arcs), one facility tier → design mode,
-assignment / pairs / sampled commodities, elastic demand via
-`unserved_penalty`, declarative time expansion. Checked-in examples under
-`examples/` are exercised by E2E step 10, which asserts the compiled models
-reproduce the hand-built pipeline results. Later phases (R3-7b–d) remain
-design-only.
+Status: **R3-7a implemented, plus multi-tier facilities (R3-7d chained
+form)** — `scripts/arcedge_modelc.py` compiles: one street layer, demand
+layers from CSV/GeoParquet, `nearest_edge_split` couplings, hard/soft edge
+capacities (soft compiled as overflow arcs), assignment / pairs / sampled
+commodities, elastic demand via `unserved_penalty`, declarative time
+expansion — and **facility tier chains**: tiers declared in serving order
+(e.g. address → terminal ≤12 → FDH ≤512 → OLT ≤4000) run as chained design
+passes via `--solve`, each pass's opened facilities becoming the next pass's
+demand-weighted terminals. Facility *serving* capacity is native in the C++
+solver (`--hub-cap`, over-capacity hubs shed their heaviest child subtree
+during repair), demands are weighted, and upper-tier demand nodes are
+transit-capable (`--demand-transit`). Checked-in examples under `examples/`
+are exercised by E2E step 10. Remaining phases: R3-7b (OD matrices, node
+capacities), R3-7c (multiplier-clamp soft caps, overage exports), and the
+exact (non-chained) multi-tier formulation.
 
 Schema note learned in implementation: the capacity-rule selector key is
 **`where:`** (the spec originally used `on:`, which YAML 1.1 parses as the

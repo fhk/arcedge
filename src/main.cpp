@@ -2,6 +2,7 @@
 #include <cstring>
 #include <fstream>
 #include <iomanip>
+#include <sstream>
 #include <string>
 #include <thread>
 
@@ -24,9 +25,11 @@ void usage() {
       "  arcedge solve INSTANCE [--iters N] [--tol X] [--threads N]\n"
       "              [--primal-every N] [--sp-backend auto|dijkstra|dag|cuda]\n"
       "              [--result FILE] [--flow FILE] [--no-primal] [--quiet]\n"
-      "  arcedge design --graph FILE --pois FILE [--cap X] [--hub-cost X]\n"
-      "              [--cable-cost X] [--max-k N] [--seed N] [--result FILE]\n"
-      "              [--solution FILE] [--quiet]\n");
+      "  arcedge design --graph FILE --pois FILE [--cap X] [--hub-cap X]\n"
+      "              [--hub-cost X] [--cable-cost X] [--demand-transit]\n"
+      "              [--max-k N] [--threads N] [--seed N] [--result FILE]\n"
+      "              [--solution FILE] [--quiet]\n"
+      "  (pois file lines: <node-id> [demand]; caps <= 0 mean uncapacitated)\n");
 }
 
 bool arg_match(int argc, char** argv, int& i, const char* name, std::string& out) {
@@ -126,6 +129,8 @@ int run_design(int argc, char** argv) {
     else if (arg_match(argc, argv, i, "--solution", v)) solution_path = v;
     else if (arg_match(argc, argv, i, "--pois", v)) pois_path = v;
     else if (arg_match(argc, argv, i, "--cap", v)) p.edge_cap = std::stod(v);
+    else if (arg_match(argc, argv, i, "--hub-cap", v)) p.hub_cap = std::stod(v);
+    else if (std::strcmp(argv[i], "--demand-transit") == 0) p.demand_transit = true;
     else if (arg_match(argc, argv, i, "--hub-cost", v)) p.hub_cost = std::stod(v);
     else if (arg_match(argc, argv, i, "--cable-cost", v)) p.cable_cost_per_m = std::stod(v);
     else if (arg_match(argc, argv, i, "--max-k", v)) p.max_k = std::stoi(v);
@@ -138,17 +143,28 @@ int run_design(int argc, char** argv) {
   if (graph_path.empty() || pois_path.empty()) { usage(); return 2; }
   const arcedge::StreetGraph g = arcedge::StreetGraph::load(graph_path);
   std::vector<int32_t> pois;
+  std::vector<double> demands;
   {
+    // Each line: <node-id> [demand]; demand defaults to 1.
     std::ifstream in(pois_path);
     if (!in) { std::fprintf(stderr, "cannot open pois file\n"); return 1; }
-    int32_t id;
-    while (in >> id) pois.push_back(id);
+    std::string line;
+    while (std::getline(in, line)) {
+      if (line.empty() || line[0] == 'c') continue;
+      std::istringstream ss(line);
+      int32_t id;
+      double q = 1.0;
+      if (!(ss >> id)) continue;
+      ss >> q;
+      pois.push_back(id);
+      demands.push_back(q);
+    }
   }
-  std::printf("design: %d nodes, %zu directed arcs, %zu POIs; cap %.0f, "
-              "hub cost %.0f, cable cost %.2f/m\n",
-              g.num_nodes, g.arcs.size(), pois.size(), p.edge_cap, p.hub_cost,
-              p.cable_cost_per_m);
-  const arcedge::DesignResult res = arcedge::design(g, pois, p);
+  std::printf("design: %d nodes, %zu directed arcs, %zu POIs; edge cap %.0f, "
+              "hub cap %.0f, hub cost %.0f, cable cost %.2f/m\n",
+              g.num_nodes, g.arcs.size(), pois.size(), p.edge_cap, p.hub_cap,
+              p.hub_cost, p.cable_cost_per_m);
+  const arcedge::DesignResult res = arcedge::design(g, pois, p, demands);
   if (!res.feasible) {
     std::fprintf(stderr, "design infeasible: POIs disconnected or capacity too tight\n");
     return 1;

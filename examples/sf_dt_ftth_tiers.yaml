@@ -1,0 +1,43 @@
+# Downtown SF FTTH hierarchy: every address point (demand 1) is served by a
+# terminal (<= 12 addresses), terminals aggregate into FDH cabinets
+# (<= 512 addresses), FDHs feed an OLT (<= 4000 addresses). Facility tiers
+# are declared in serving order; the compiler chains one design pass per
+# tier, each pass's opened facilities becoming the next pass's
+# demand-weighted terminals.
+#
+#   python3 scripts/arcedge_modelc.py examples/sf_dt_ftth_tiers.yaml \
+#       -o out/dt_ftth --solve
+model_version: 1
+name: sf-dt-ftth-tiers
+
+layers:
+  streets:
+    source: { file: data/sf_downtown.graph }
+  addresses:
+    source: { csv: examples/sf_dt_pois.csv }
+    role: terminals
+
+couplings:
+  - name: drops
+    from: addresses
+    to: streets
+    method: nearest_edge_split
+    snap_m: 0.5
+
+facilities:
+  terminal:
+    open_cost: 500
+    capacity: { hard: 12 }
+  fdh:
+    open_cost: 20000
+    capacity: { hard: 512 }
+  olt:
+    open_cost: 100000
+    capacity: { hard: 4000 }
+
+cable:
+  fixed_cost_per_m: 10
+
+commodities:
+  - name: service
+    assignment: { from: { nodes: { layer: addresses } }, demand: 1, tier: terminal }

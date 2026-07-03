@@ -84,21 +84,32 @@ echo "=== [10/10] model config: compile examples, solve, check acceptance ==="
 python3 scripts/arcedge_modelc.py examples/sf_dt_access_design.yaml \
   -o out/dt_design > /dev/null
 ./build/arcedge design --graph out/dt_design/access.graph \
-  --pois out/dt_design/access.pois --cap 500 --hub-cost 20000 \
+  --pois out/dt_design/tier0.pois --cap 500 --hub-cost 20000 \
   --cable-cost 10 --quiet --result out/dt_design/result.txt
 python3 scripts/arcedge_modelc.py examples/sf_dt_te_mcf.yaml \
   -o out/dt_mcf > /dev/null
 ./build/arcedge solve out/dt_mcf/instance.txt --iters 300 --tol 0.005 \
   --quiet --result out/dt_mcf/result.txt
+# Multi-tier FTTH chain: 1 address -> terminal (12) -> FDH (512) -> OLT (4000)
+python3 scripts/arcedge_modelc.py examples/sf_dt_ftth_tiers.yaml \
+  -o out/dt_ftth --solve
 python3 - <<'PYEOF'
+import json, math
 d = dict(l.split() for l in open('out/dt_design/result.txt')
          if not l.startswith('hub_nodes'))
 total = float(d['total_cost'])
 assert abs(total - 392123) <= 0.01 * 392123, f'design total {total} off baseline'
 m = dict(l.split() for l in open('out/dt_mcf/result.txt'))
 assert float(m['gap']) <= 0.01, f"mcf gap {m['gap']} > 1%"
+t = json.load(open('out/dt_ftth/tiers_summary.json'))
+tiers = {x['tier']: x for x in t['tiers']}
+assert tiers['terminal']['hubs'] >= math.ceil(400 / 12), 'terminal cap violated'
+assert tiers['fdh']['hubs'] >= 1 and tiers['olt']['hubs'] >= 1
+assert t['total_cost'] < 1e6, 'FTTH chain cost unreasonable'
 print(f"model-config acceptance OK: design total {total:.0f} "
-      f"(baseline 392123), mcf gap {100 * float(m['gap']):.3f}%")
+      f"(baseline 392123), mcf gap {100 * float(m['gap']):.3f}%, "
+      f"ftth chain {tiers['terminal']['hubs']}t/{tiers['fdh']['hubs']}f/"
+      f"{tiers['olt']['hubs']}o = {t['total_cost']:.0f}")
 PYEOF
 
 echo

@@ -32,7 +32,8 @@ struct Net {
   std::vector<double> x, y;  // projected coords (m)
 };
 
-Net build_net(const StreetGraph& g, const std::vector<int32_t>& pois) {
+Net build_net(const StreetGraph& g, const std::vector<int32_t>& pois,
+              bool mark_leaves) {
   Net net;
   net.n = g.num_nodes;
   std::set<std::pair<int32_t, int32_t>> seen;
@@ -64,7 +65,8 @@ Net build_net(const StreetGraph& g, const std::vector<int32_t>& pois) {
         static_cast<int32_t>(e);
   }
   net.is_poi.assign(static_cast<size_t>(net.n), 0);
-  for (int32_t p : pois) net.is_poi[static_cast<size_t>(p)] = 1;
+  if (mark_leaves)
+    for (int32_t p : pois) net.is_poi[static_cast<size_t>(p)] = 1;
   // Equirectangular projection, consistent with scripts/connect_pois.py.
   const double kx = 111320.0 * std::cos(37.77 * M_PI / 180.0), ky = 110540.0;
   net.x.resize(static_cast<size_t>(net.n));
@@ -143,9 +145,11 @@ std::vector<DesignUsedEdge> used_from_loads(const Net& net,
 // hubs at the congested side of overloaded edges. Fills `load`; returns false
 // if a POI is disconnected or the repair does not converge.
 bool route_repair(const Net& net, const std::vector<int32_t>& pois,
-                  std::vector<int32_t>& hubs, const DesignParams& p, Forest& f,
+                  const std::vector<double>& dem, std::vector<int32_t>& hubs,
+                  const DesignParams& p, Forest& f,
                   const std::vector<double>* edge_cost, std::vector<double>& load) {
   std::set<int32_t> hub_set(hubs.begin(), hubs.end());
+  std::vector<double> served(static_cast<size_t>(net.n), 0.0);
   // Batched relief: a fraction of the overloaded funnels get relief hubs
   // per round (worst first), so rounds scale roughly logarithmically in the
   // relief count instead of linearly (one-per-round was the measured
@@ -155,25 +159,61 @@ bool route_repair(const Net& net, const std::vector<int32_t>& pois,
   for (int repair = 0; repair < 200; ++repair) {
     grow_forest(net, hubs, f, edge_cost);
     std::fill(load.begin(), load.end(), 0.0);
-    for (int32_t poi : pois) {
+    std::fill(served.begin(), served.end(), 0.0);
+    for (size_t i = 0; i < pois.size(); ++i) {
+      const int32_t poi = pois[i];
       if (f.hub_of[static_cast<size_t>(poi)] < 0) return false;  // disconnected
+      served[static_cast<size_t>(f.hub_of[static_cast<size_t>(poi)])] += dem[i];
       for (int32_t v = poi; f.parent_edge[static_cast<size_t>(v)] >= 0;
            v = f.parent_node[static_cast<size_t>(v)])
-        load[static_cast<size_t>(f.parent_edge[static_cast<size_t>(v)])] += 1.0;
+        load[static_cast<size_t>(f.parent_edge[static_cast<size_t>(v)])] += dem[i];
     }
     std::vector<std::pair<double, int32_t>> overloaded;  // (load, edge)
     std::vector<char> is_over(load.size(), 0);
-    for (size_t e = 0; e < load.size(); ++e)
-      if (load[e] > p.edge_cap) {
-        overloaded.emplace_back(load[e], static_cast<int32_t>(e));
-        is_over[e] = 1;
-      }
-    if (overloaded.empty()) return true;
+    if (p.edge_cap > 0.0)
+      for (size_t e = 0; e < load.size(); ++e)
+        if (load[e] > p.edge_cap) {
+          overloaded.emplace_back(load[e], static_cast<int32_t>(e));
+          is_over[e] = 1;
+        }
+    // Over-capacity HUBS also demand relief: shed their heaviest child
+    // subtree by opening a hub at its head.
+    std::vector<std::pair<double, int32_t>> hub_relief;  // (served, relief node)
+    if (p.hub_cap > 0.0)
+      for (int32_t h : hubs)
+        if (served[static_cast<size_t>(h)] > p.hub_cap) {
+          double best_ld = 0.0;
+          int32_t relief = -1;
+          for (int32_t i2 = net.adj_off[static_cast<size_t>(h)];
+               i2 < net.adj_off[static_cast<size_t>(h) + 1]; ++i2) {
+            const int32_t w = net.adj_nbr[static_cast<size_t>(i2)];
+            const int32_t e = net.adj_edge[static_cast<size_t>(i2)];
+            if (f.parent_edge[static_cast<size_t>(w)] == e &&
+                load[static_cast<size_t>(e)] > best_ld &&
+                !net.is_poi[static_cast<size_t>(w)]) {
+              best_ld = load[static_cast<size_t>(e)];
+              relief = w;
+            }
+          }
+          if (relief >= 0)
+            hub_relief.emplace_back(served[static_cast<size_t>(h)], relief);
+        }
+    if (overloaded.empty() && hub_relief.empty()) return true;
     std::sort(overloaded.rbegin(), overloaded.rend());
-    const int per_round = std::max(
-        1, std::min(64, static_cast<int>(overloaded.size()) / 4));
+    std::sort(hub_relief.rbegin(), hub_relief.rend());
+    const int n_cand =
+        static_cast<int>(overloaded.size() + hub_relief.size());
+    const int per_round = std::max(1, std::min(64, n_cand / 4));
     int added = 0;
+    for (const auto& [sv, relief] : hub_relief) {
+      if (added >= per_round) break;
+      if (hub_set.insert(relief).second) {
+        hubs.push_back(relief);
+        ++added;
+      }
+    }
     for (const auto& [ld, e] : overloaded) {
+      if (added >= per_round) break;
       const int32_t u = net.eu[static_cast<size_t>(e)];
       const int32_t v = net.ev[static_cast<size_t>(e)];
       const bool u_far = f.parent_edge[static_cast<size_t>(u)] == e;
@@ -192,7 +232,7 @@ bool route_repair(const Net& net, const std::vector<int32_t>& pois,
       if (has_over_ancestor) continue;
       if (hub_set.insert(relief).second) {
         hubs.push_back(relief);
-        if (++added >= per_round) break;
+        ++added;
       }
     }
     if (added == 0) return false;  // overloaded but no new relief site
@@ -211,14 +251,15 @@ bool route_repair(const Net& net, const std::vector<int32_t>& pois,
 // so concurrent clusters may share `load`/`tree_edge` without locks -- they
 // touch disjoint indices. Returns the cluster's cable meters or -1.
 double sph_cluster(const Net& net, const Forest& f, const DesignParams& p,
-                   int32_t hub, const std::vector<int32_t>& cluster_pois,
+                   int32_t hub,
+                   const std::vector<std::pair<int32_t, double>>& cluster_pois,
                    std::vector<double>& load, std::vector<char>& tree_edge,
                    std::vector<double>& dist, std::vector<int32_t>& pe,
                    std::vector<int32_t>& pn, std::vector<uint32_t>& stamp,
                    uint32_t& version) {
   double cable = 0.0;
   using Item = std::pair<double, int32_t>;
-  for (int32_t poi : cluster_pois) {
+  for (const auto& [poi, q] : cluster_pois) {
     ++version;
     std::priority_queue<Item, std::vector<Item>, std::greater<Item>> pq;
     dist[static_cast<size_t>(poi)] = 0.0;
@@ -241,7 +282,9 @@ double sph_cluster(const Net& net, const Forest& f, const DesignParams& p,
         if (v != hub && f.hub_of[static_cast<size_t>(v)] != hub) continue;
         double w;
         if (tree_edge[static_cast<size_t>(e)]) {
-          if (load[static_cast<size_t>(e)] >= p.edge_cap - 0.5) continue;  // full
+          if (p.edge_cap > 0.0 &&
+              load[static_cast<size_t>(e)] + q > p.edge_cap + 1e-9)
+            continue;  // full for this demand
           w = 0.0;
         } else {
           w = net.elen[static_cast<size_t>(e)];
@@ -260,7 +303,7 @@ double sph_cluster(const Net& net, const Forest& f, const DesignParams& p,
     if (!reached) return -1.0;
     for (int32_t v = hub; pe[static_cast<size_t>(v)] >= 0; v = pn[static_cast<size_t>(v)]) {
       const int32_t e = pe[static_cast<size_t>(v)];
-      load[static_cast<size_t>(e)] += 1.0;
+      load[static_cast<size_t>(e)] += q;
       if (!tree_edge[static_cast<size_t>(e)]) {
         tree_edge[static_cast<size_t>(e)] = 1;
         cable += net.elen[static_cast<size_t>(e)];
@@ -271,6 +314,7 @@ double sph_cluster(const Net& net, const Forest& f, const DesignParams& p,
 }
 
 double sph_consolidate(const Net& net, const std::vector<int32_t>& pois,
+                       const std::vector<double>& dem,
                        const std::vector<int32_t>& hubs, const Forest& f,
                        const DesignParams& p, std::vector<double>& load) {
   (void)hubs;
@@ -279,19 +323,20 @@ double sph_consolidate(const Net& net, const std::vector<int32_t>& pois,
   std::vector<char> tree_edge(m, 0);
 
   // Group POIs by serving hub, nearest-first within each cluster.
-  std::vector<std::pair<int32_t, int32_t>> by_hub;  // (hub, poi)
+  struct Item3 { int32_t hub, poi; double q; };
+  std::vector<Item3> by_hub;
   by_hub.reserve(pois.size());
-  for (int32_t poi : pois)
-    by_hub.emplace_back(f.hub_of[static_cast<size_t>(poi)], poi);
-  std::sort(by_hub.begin(), by_hub.end(), [&](const auto& a, const auto& b) {
-    if (a.first != b.first) return a.first < b.first;
-    return f.dist[static_cast<size_t>(a.second)] < f.dist[static_cast<size_t>(b.second)];
+  for (size_t i = 0; i < pois.size(); ++i)
+    by_hub.push_back({f.hub_of[static_cast<size_t>(pois[i])], pois[i], dem[i]});
+  std::sort(by_hub.begin(), by_hub.end(), [&](const Item3& a, const Item3& b) {
+    if (a.hub != b.hub) return a.hub < b.hub;
+    return f.dist[static_cast<size_t>(a.poi)] < f.dist[static_cast<size_t>(b.poi)];
   });
-  std::vector<std::pair<int32_t, std::vector<int32_t>>> clusters;
-  for (const auto& [hub, poi] : by_hub) {
-    if (clusters.empty() || clusters.back().first != hub)
-      clusters.push_back({hub, {}});
-    clusters.back().second.push_back(poi);
+  std::vector<std::pair<int32_t, std::vector<std::pair<int32_t, double>>>> clusters;
+  for (const Item3& it : by_hub) {
+    if (clusters.empty() || clusters.back().first != it.hub)
+      clusters.push_back({it.hub, {}});
+    clusters.back().second.emplace_back(it.poi, it.q);
   }
 
   // Clusters run in parallel; per-worker scratch, lock-free shared state
@@ -330,11 +375,11 @@ double sph_consolidate(const Net& net, const std::vector<int32_t>& pois,
 // Evaluates a hub set: shortest-path forest with capacity repair, then
 // (optionally) SPH consolidation, keeping the cheaper feasible design.
 Eval evaluate(const Net& net, const std::vector<int32_t>& pois,
-              std::vector<int32_t> hubs, const DesignParams& p, Forest& f,
-              bool consolidate) {
+              const std::vector<double>& dem, std::vector<int32_t> hubs,
+              const DesignParams& p, Forest& f, bool consolidate) {
   Eval ev;
   std::vector<double> load(net.elen.size());
-  if (!route_repair(net, pois, hubs, p, f, nullptr, load)) return ev;
+  if (!route_repair(net, pois, dem, hubs, p, f, nullptr, load)) return ev;
   double cable = 0.0;
   for (size_t e = 0; e < load.size(); ++e)
     if (load[e] > 0.0) cable += net.elen[e];
@@ -348,7 +393,8 @@ Eval evaluate(const Net& net, const std::vector<int32_t>& pois,
     ev.poi_hub[i] = f.hub_of[static_cast<size_t>(pois[i])];
   if (consolidate) {
     std::vector<double> sph_load;
-    const double sph_cable = sph_consolidate(net, pois, hubs, f, p, sph_load);
+    const double sph_cable =
+        sph_consolidate(net, pois, dem, hubs, f, p, sph_load);
     if (sph_cable >= 0.0 && sph_cable < ev.cable_m) {
       ev.cable_m = sph_cable;
       ev.cost = p.hub_cost * static_cast<double>(hubs.size()) +
@@ -455,15 +501,31 @@ std::vector<int32_t> recenter(const Net& net, const std::vector<int32_t>& pois,
 }  // namespace
 
 DesignResult design(const StreetGraph& g, const std::vector<int32_t>& pois,
-                    const DesignParams& p) {
+                    const DesignParams& p, const std::vector<double>& demands) {
   if (pois.empty()) throw std::runtime_error("no POIs to serve");
   const auto t0 = std::chrono::steady_clock::now();
-  const Net net = build_net(g, pois);
+  const Net net = build_net(g, pois, !p.demand_transit);
+  std::vector<double> dem = demands;
+  if (dem.empty()) dem.assign(pois.size(), 1.0);
+  if (dem.size() != pois.size())
+    throw std::runtime_error("demands size mismatch");
+  if (p.hub_cap > 0.0)
+    for (double q : dem)
+      if (q > p.hub_cap)
+        throw std::runtime_error("a single demand exceeds hub_cap");
 
   const int n_pois = static_cast<int>(pois.size());
-  // The k-means seeding is O(k * pois), so the sweep is capped; the capacity
-  // repair can still push the realized hub count above max_k when needed.
-  const int max_k = p.max_k > 0 ? p.max_k : std::min(1024, std::max(1, n_pois / 8));
+  double total_demand = 0.0;
+  for (double q : dem) total_demand += q;
+  // The k-means seeding is O(k * pois), so the COARSE sweep is capped -- but
+  // never below what the hub capacity provably requires. Refinement phases
+  // may probe any k up to the POI count (realized hub counts routinely
+  // exceed the sweep cap once capacity repair kicks in).
+  int max_k = p.max_k > 0 ? p.max_k : std::min(1024, std::max(1, n_pois / 8));
+  if (p.hub_cap > 0.0)
+    max_k = std::max(max_k,
+                     std::min(1024, static_cast<int>(
+                                        2.0 * total_demand / p.hub_cap) + 1));
   const int nthreads = p.threads > 0
                            ? p.threads
                            : std::max(1u, std::thread::hardware_concurrency());
@@ -473,14 +535,14 @@ DesignResult design(const StreetGraph& g, const std::vector<int32_t>& pois,
   // Candidate k's are independent; each gets its own deterministic RNG
   // (seeded by k) so results do not depend on thread scheduling.
   auto try_k = [&](int k, bool consolidate) {
-    if (k < 1 || k > max_k) return;
+    if (k < 1 || k > n_pois) return;
     std::mt19937 rng(p.seed * 2654435761u + static_cast<unsigned>(k));
     Forest f;
     std::vector<int32_t> hubs = seed_hubs(net, pois, k, rng);
-    Eval ev = evaluate(net, pois, hubs, p, f, consolidate);
+    Eval ev = evaluate(net, pois, dem, hubs, p, f, consolidate);
     for (int round = 0; round < 2 && ev.feasible; ++round) {
       std::vector<int32_t> moved = recenter(net, pois, ev.hubs, f);
-      Eval ev2 = evaluate(net, pois, std::move(moved), p, f, consolidate);
+      Eval ev2 = evaluate(net, pois, dem, std::move(moved), p, f, consolidate);
       if (ev2.feasible && ev2.cost < ev.cost) ev = std::move(ev2);
       else break;
     }
@@ -534,13 +596,15 @@ DesignResult design(const StreetGraph& g, const std::vector<int32_t>& pois,
     Forest f;
     int batch = 8;
     for (int it = 0; it < 30 && batch >= 1 && best.hubs.size() > 1; ++it) {
-      std::vector<int32_t> served(best.hubs.size(), 0);
+      std::vector<double> served(best.hubs.size(), 0.0);
       std::vector<int32_t> idx_of(static_cast<size_t>(net.n), -1);
       for (size_t h = 0; h < best.hubs.size(); ++h)
         idx_of[static_cast<size_t>(best.hubs[h])] = static_cast<int32_t>(h);
-      for (int32_t hub : best.poi_hub)
+      for (size_t i = 0; i < best.poi_hub.size(); ++i) {
+        const int32_t hub = best.poi_hub[i];
         if (hub >= 0 && idx_of[static_cast<size_t>(hub)] >= 0)
-          served[static_cast<size_t>(idx_of[static_cast<size_t>(hub)])]++;
+          served[static_cast<size_t>(idx_of[static_cast<size_t>(hub)])] += dem[i];
+      }
       std::vector<size_t> by_load(best.hubs.size());
       std::iota(by_load.begin(), by_load.end(), size_t{0});
       std::sort(by_load.begin(), by_load.end(),
@@ -551,7 +615,7 @@ DesignResult design(const StreetGraph& g, const std::vector<int32_t>& pois,
       std::vector<int32_t> trial;
       for (size_t h = 0; h < best.hubs.size(); ++h)
         if (!dropped.count(h)) trial.push_back(best.hubs[h]);
-      Eval ev = evaluate(net, pois, std::move(trial), p, f, false);
+      Eval ev = evaluate(net, pois, dem, std::move(trial), p, f, false);
       if (ev.feasible && ev.cost < best.cost) {
         if (p.verbose)
           std::printf("prune -%d -> hubs %4zu  cost %.0f\n", batch,

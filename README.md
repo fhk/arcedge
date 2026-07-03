@@ -123,11 +123,34 @@ python3 scripts/arcedge_modelc.py examples/sf_dt_te_mcf.yaml -o out/dt_mcf
 # each prints the arcedge command to solve the compiled model
 ```
 
-The two checked-in examples reproduce the hand-built pipelines (E2E step 10
+The checked-in examples reproduce the hand-built pipelines (E2E step 10
 asserts it): the design config lands on the 392,123 downtown baseline, and
 the soft-capacity MCF config closes to ~0% gap — and can never go
 hard-infeasible, because overloads cost penalty instead of killing the
 instance.
+
+**Facility tiers (FTTH hierarchy).** Declare tiers in serving order and the
+compiler chains one design pass per tier — each pass's opened facilities
+become the next pass's demand-weighted terminals:
+
+```yaml
+facilities:
+  terminal: { open_cost: 500,    capacity: { hard: 12 } }    # <= 12 addresses
+  fdh:      { open_cost: 20000,  capacity: { hard: 512 } }   # <= 512
+  olt:      { open_cost: 100000, capacity: { hard: 4000 } }  # <= 4000
+```
+
+```bash
+python3 scripts/arcedge_modelc.py examples/sf_dt_ftth_tiers.yaml -o out/dt_ftth --solve
+# [tier 1/3: terminal] -> 80 terminal(s), 28907 m cable, cost 329071
+# [tier 2/3: fdh]      -> 1 fdh(s),       15973 m cable, cost 179734
+# [tier 3/3: olt]      -> 1 olt(s),           0 m cable, cost 100000
+# CHAIN TOTAL COST 608804
+```
+
+Facility *serving* capacity is native in the solver (`design --hub-cap`,
+with demand-weighted POIs via a second column in the pois file and
+`--demand-transit` for upper tiers whose demand sits on street cabinets).
 
 ## Solution output: GeoParquet
 
