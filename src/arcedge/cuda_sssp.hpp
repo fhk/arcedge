@@ -26,12 +26,13 @@ class CudaBatchSssp {
   static bool available();  // a CUDA device is present
 
   // Solves SSSP for every commodity under `cost` (converted to FP32).
-  // Fills per-commodity distances and path arc ids, matching the semantics
-  // of the CPU backends (paths in reverse order).
+  // Fills per-commodity distances and the demand-weighted per-arc flow
+  // (`loads`), both accumulated on the device -- only ~4 bytes per arc plus
+  // one distance per commodity cross the PCIe bus, not the full distance
+  // matrix. Paths never materialize on the host.
   void solve(const std::vector<double>& cost,
              const std::vector<Commodity>& commodities,
-             std::vector<double>& dists,
-             std::vector<std::vector<int32_t>>& paths);
+             std::vector<double>& dists, std::vector<double>& loads);
 
  private:
   struct Impl;

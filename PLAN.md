@@ -248,7 +248,7 @@ Notes:
 | Milestone | Status | Evidence |
 |-----------|--------|----------|
 | S2-M0 CPU DAG level-sweep backend | **done** | `--sp-backend dag`: bit-equal LB/UB with Dijkstra on the SF 1.7M-arc instance (lb 1390235.88, ub 1399750.63, 21 iters both) and already 1.26× faster on 4 CPU cores (7.9 s vs 10.0 s); unit equivalence test in `ctest` |
-| S2-M1 CUDA backend | code landed, needs GPU run | `src/arcedge/cuda_sssp.cu` (`-DARCEDGE_CUDA=ON`): per-level bulk relaxation, packed 64-bit atomicMin (FP32 dist bits + parent arc), graph resident across iterations; run + measure via the Colab notebook |
+| S2-M1 CUDA backend | **validated on Colab T4**; readback optimization landed, needs re-run | First T4 run: FP32 LB within 3e-8 of FP64 (1390235.835 vs .880), solve reached 0.287% gap in 3.15 s vs 3.40 s CPU-dag on the same box. Profiling insight: the per-iteration K×N packed readback (~0.5 GB over PCIe) dominated — now replaced by device-side path walking (loads accumulated on GPU, ~6.7 MB back per iteration) plus FP64 re-certification of the final LB at the best multipliers |
 | S2-M2 LNS for design mode | next | — |
 | S2-M3 LNS for MCF | pending | — |
 | S2-M4 Steiner/PCST bounds | pending | — |

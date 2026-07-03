@@ -66,6 +66,29 @@ __global__ void relax_level(const int32_t* tail, const int32_t* head,
   }
 }
 
+// One thread per commodity: read the destination distance, then walk the
+// parent chain accumulating demand onto every arc of the path. Loads stay on
+// the device; only they and the K distances are copied back.
+__global__ void gather_paths(const unsigned long long* packed,
+                             const int32_t* tail, const int32_t* srcs,
+                             const int32_t* dsts, const float* demand,
+                             int k_count, int n, float* dist_out,
+                             float* loads) {
+  const int k = blockIdx.x * blockDim.x + threadIdx.x;
+  if (k >= k_count) return;
+  const unsigned long long* row = packed + static_cast<size_t>(k) * n;
+  const unsigned dbits = static_cast<unsigned>(row[dsts[k]] >> 32);
+  dist_out[k] = __uint_as_float(dbits);
+  if (dbits >= kInfBits) return;  // unreachable: caller sees +inf
+  const float q = demand[k];
+  int32_t v = dsts[k];
+  for (int guard = 0; v != srcs[k] && guard < n; ++guard) {
+    const unsigned a = static_cast<unsigned>(row[v]);
+    atomicAdd(&loads[a], q);
+    v = tail[a];
+  }
+}
+
 int grid_for(long long work, int block = 256) {
   const long long g = (work + block - 1) / block;
   return static_cast<int>(g > 4096 ? 4096 : (g < 1 ? 1 : g));
@@ -78,18 +101,22 @@ struct CudaBatchSssp::Impl {
   int32_t num_levels = 0;
   std::vector<int32_t> level_off;    // host copy of bucket offsets
   std::vector<int32_t> level_of;     // host copy for the sweep bound
-  const Instance* inst = nullptr;
-
+  size_t m = 0;
   int32_t* d_tail = nullptr;
   int32_t* d_head = nullptr;
   float* d_cost = nullptr;
   int32_t* d_bucket = nullptr;
   int32_t* d_srcs = nullptr;
+  int32_t* d_dsts = nullptr;
+  float* d_demand = nullptr;
+  float* d_dist_out = nullptr;
+  float* d_loads = nullptr;
   unsigned long long* d_packed = nullptr;
   size_t packed_cap = 0;  // commodities currently allocated for
   std::vector<float> h_cost;
-  std::vector<unsigned long long> h_packed;
-  std::vector<int32_t> h_srcs;
+  std::vector<float> h_small;  // reused staging for K-sized transfers
+  std::vector<float> h_loads;
+  std::vector<int32_t> h_ids;
 
   ~Impl() {
     cudaFree(d_tail);
@@ -97,6 +124,10 @@ struct CudaBatchSssp::Impl {
     cudaFree(d_cost);
     cudaFree(d_bucket);
     cudaFree(d_srcs);
+    cudaFree(d_dsts);
+    cudaFree(d_demand);
+    cudaFree(d_dist_out);
+    cudaFree(d_loads);
     cudaFree(d_packed);
   }
 };
@@ -115,7 +146,6 @@ CudaBatchSssp::CudaBatchSssp(const Instance& inst, const DagLevels& dag)
   im.num_levels = dag.num_levels;
   im.level_off = dag.level_off;
   im.level_of = dag.level_of;
-  im.inst = &inst;
   const size_t m = inst.arcs.size();
   std::vector<int32_t> tail(m), head(m);
   for (size_t a = 0; a < m; ++a) {
@@ -132,15 +162,17 @@ CudaBatchSssp::CudaBatchSssp(const Instance& inst, const DagLevels& dag)
                                 cudaMemcpyHostToDevice));
   ARCEDGE_CUDA_CHECK(cudaMemcpy(im.d_bucket, dag.arcs_by_level.data(),
                                 m * sizeof(int32_t), cudaMemcpyHostToDevice));
+  ARCEDGE_CUDA_CHECK(cudaMalloc(&im.d_loads, m * sizeof(float)));
+  im.m = m;
   im.h_cost.resize(m);
+  im.h_loads.resize(m);
 }
 
 CudaBatchSssp::~CudaBatchSssp() = default;
 
 void CudaBatchSssp::solve(const std::vector<double>& cost,
                           const std::vector<Commodity>& commodities,
-                          std::vector<double>& dists,
-                          std::vector<std::vector<int32_t>>& paths) {
+                          std::vector<double>& dists, std::vector<double>& loads) {
   Impl& im = *impl_;
   const size_t m = cost.size();
   const size_t k_count = commodities.size();
@@ -155,19 +187,34 @@ void CudaBatchSssp::solve(const std::vector<double>& cost,
   if (im.packed_cap < k_count) {
     cudaFree(im.d_packed);
     cudaFree(im.d_srcs);
+    cudaFree(im.d_dsts);
+    cudaFree(im.d_demand);
+    cudaFree(im.d_dist_out);
     ARCEDGE_CUDA_CHECK(
         cudaMalloc(&im.d_packed, total * sizeof(unsigned long long)));
     ARCEDGE_CUDA_CHECK(cudaMalloc(&im.d_srcs, k_count * sizeof(int32_t)));
+    ARCEDGE_CUDA_CHECK(cudaMalloc(&im.d_dsts, k_count * sizeof(int32_t)));
+    ARCEDGE_CUDA_CHECK(cudaMalloc(&im.d_demand, k_count * sizeof(float)));
+    ARCEDGE_CUDA_CHECK(cudaMalloc(&im.d_dist_out, k_count * sizeof(float)));
     im.packed_cap = k_count;
   }
-  im.h_srcs.resize(k_count);
+  im.h_ids.resize(k_count);
+  im.h_small.resize(k_count);
   int32_t max_dst_level = 0;
   for (size_t k = 0; k < k_count; ++k) {
-    im.h_srcs[k] = commodities[k].src;
+    im.h_ids[k] = commodities[k].src;
+    im.h_small[k] = static_cast<float>(commodities[k].demand);
     max_dst_level = std::max(
         max_dst_level, im.level_of[static_cast<size_t>(commodities[k].dst)]);
   }
-  ARCEDGE_CUDA_CHECK(cudaMemcpy(im.d_srcs, im.h_srcs.data(),
+  ARCEDGE_CUDA_CHECK(cudaMemcpy(im.d_srcs, im.h_ids.data(),
+                                k_count * sizeof(int32_t),
+                                cudaMemcpyHostToDevice));
+  ARCEDGE_CUDA_CHECK(cudaMemcpy(im.d_demand, im.h_small.data(),
+                                k_count * sizeof(float),
+                                cudaMemcpyHostToDevice));
+  for (size_t k = 0; k < k_count; ++k) im.h_ids[k] = commodities[k].dst;
+  ARCEDGE_CUDA_CHECK(cudaMemcpy(im.d_dsts, im.h_ids.data(),
                                 k_count * sizeof(int32_t),
                                 cudaMemcpyHostToDevice));
 
@@ -187,31 +234,27 @@ void CudaBatchSssp::solve(const std::vector<double>& cost,
         im.d_bucket + im.level_off[static_cast<size_t>(l)], bucket_size,
         static_cast<int>(k_count), im.n, im.d_packed);
   }
+
+  // Device-side path walk: loads and distances come back over PCIe instead
+  // of the K x N packed matrix (6.7 MB vs ~0.5 GB on the SF instance).
+  ARCEDGE_CUDA_CHECK(cudaMemset(im.d_loads, 0, m * sizeof(float)));
+  gather_paths<<<grid_for(static_cast<long long>(k_count)), 256>>>(
+      im.d_packed, im.d_tail, im.d_srcs, im.d_dsts, im.d_demand,
+      static_cast<int>(k_count), im.n, im.d_dist_out, im.d_loads);
   ARCEDGE_CUDA_CHECK(cudaGetLastError());
 
-  im.h_packed.resize(total);
-  ARCEDGE_CUDA_CHECK(cudaMemcpy(im.h_packed.data(), im.d_packed,
-                                total * sizeof(unsigned long long),
+  ARCEDGE_CUDA_CHECK(cudaMemcpy(im.h_small.data(), im.d_dist_out,
+                                k_count * sizeof(float),
                                 cudaMemcpyDeviceToHost));
+  ARCEDGE_CUDA_CHECK(cudaMemcpy(im.h_loads.data(), im.d_loads,
+                                m * sizeof(float), cudaMemcpyDeviceToHost));
 
   dists.assign(k_count, kInf);
-  for (size_t k = 0; k < k_count; ++k) {
-    const unsigned long long* row = im.h_packed.data() + k * static_cast<size_t>(im.n);
-    const unsigned dbits =
-        static_cast<unsigned>(row[static_cast<size_t>(commodities[k].dst)] >> 32);
-    paths[k].clear();
-    if (dbits >= kInfBits) continue;  // unreachable
-    float df;
-    std::memcpy(&df, &dbits, sizeof(float));
-    dists[k] = static_cast<double>(df);
-    for (int32_t v = commodities[k].dst; v != commodities[k].src;) {
-      const unsigned a = static_cast<unsigned>(row[static_cast<size_t>(v)]);
-      if (a == kNoParent)
-        throw std::runtime_error("CUDA SSSP: broken parent chain");
-      paths[k].push_back(static_cast<int32_t>(a));
-      v = im.inst->arcs[a].tail;
-    }
-  }
+  for (size_t k = 0; k < k_count; ++k)
+    if (im.h_small[k] < std::numeric_limits<float>::infinity())
+      dists[k] = static_cast<double>(im.h_small[k]);
+  loads.assign(m, 0.0);
+  for (size_t a = 0; a < m; ++a) loads[a] = static_cast<double>(im.h_loads[a]);
 }
 
 }  // namespace arcedge

@@ -78,6 +78,7 @@ SolveResult solve(const Instance& inst, const SolveOptions& opt) {
   if (opt.verbose) std::printf("sp backend: %s\n", backend.c_str());
 
   std::vector<double> lambda(m, 0.0);  // stays 0 on uncapacitated arcs
+  std::vector<double> lambda_at_best_lb;  // kept for FP64 re-certification
   std::vector<double> reduced(m);
   std::vector<double> load(m);
   std::vector<double> grad(m);
@@ -97,10 +98,12 @@ SolveResult solve(const Instance& inst, const SolveOptions& opt) {
   for (int iter = 0; iter < opt.max_iters; ++iter) {
     res.iters = iter + 1;
     for (size_t a = 0; a < m; ++a) reduced[a] = inst.arcs[a].cost + lambda[a];
+    bool loads_from_engine = false;
 #ifdef ARCEDGE_CUDA
-    if (cuda_engine)
-      cuda_engine->solve(reduced, inst.commodities, dists, paths);
-    else
+    if (cuda_engine) {
+      cuda_engine->solve(reduced, inst.commodities, dists, load);
+      loads_from_engine = true;  // demand-weighted flow accumulated on device
+    } else
 #endif
       batched_shortest_paths(inst, g, backend == "dag" ? &dag : nullptr,
                              reduced, opt.threads, dists, paths);
@@ -121,6 +124,7 @@ SolveResult solve(const Instance& inst, const SolveOptions& opt) {
     if (iter == 0) lb_free_flow = lb;
     if (lb > res.best_lb + 1e-12) {
       res.best_lb = lb;
+      if (loads_from_engine) lambda_at_best_lb = lambda;  // FP32 run: recheck later
       no_improve = 0;
     } else if (++no_improve >= opt.stall_iters) {
       alpha *= 0.5;
@@ -140,10 +144,12 @@ SolveResult solve(const Instance& inst, const SolveOptions& opt) {
       break;
     }
 
-    std::fill(load.begin(), load.end(), 0.0);
-    for (size_t k = 0; k < nk; ++k)
-      for (int32_t a : paths[k])
-        load[static_cast<size_t>(a)] += inst.commodities[k].demand;
+    if (!loads_from_engine) {
+      std::fill(load.begin(), load.end(), 0.0);
+      for (size_t k = 0; k < nk; ++k)
+        for (int32_t a : paths[k])
+          load[static_cast<size_t>(a)] += inst.commodities[k].demand;
+    }
 
     if (iter % opt.primal_every == 0)
       res.best_ub = std::min(res.best_ub, primal_heuristic(inst, g, lambda));
@@ -172,10 +178,9 @@ SolveResult solve(const Instance& inst, const SolveOptions& opt) {
     }
     if (norm2 < 1e-18) {
       // The relaxed solution respects every capacity: it is primal optimal.
+      // load is the demand-weighted flow, so its true cost is the UB.
       double ub = 0.0;
-      for (size_t k = 0; k < nk; ++k)
-        for (int32_t a : paths[k])
-          ub += inst.commodities[k].demand * inst.arcs[static_cast<size_t>(a)].cost;
+      for (size_t a = 0; a < m; ++a) ub += load[a] * inst.arcs[a].cost;
       res.best_ub = std::min(res.best_ub, ub);
       res.gap = (res.best_ub - res.best_lb) / std::max(res.best_ub, 1e-12);
       break;
@@ -186,6 +191,27 @@ SolveResult solve(const Instance& inst, const SolveOptions& opt) {
     for (size_t a = 0; a < m; ++a)
       lambda[a] = std::max(0.0, lambda[a] + step * grad[a]);
   }
+
+#ifdef ARCEDGE_CUDA
+  // The GPU computes distances in FP32, so the running best_lb is not a
+  // certified bound (rounding could overestimate a distance sum). Re-evaluate
+  // L(lambda) at the best multipliers in FP64 on the CPU: any lambda >= 0
+  // gives a valid bound, so the certified value replaces the FP32 one.
+  if (cuda_engine && !lambda_at_best_lb.empty()) {
+    for (size_t a = 0; a < m; ++a)
+      reduced[a] = inst.arcs[a].cost + lambda_at_best_lb[a];
+    batched_shortest_paths(inst, g, &dag, reduced, opt.threads, dists, paths);
+    double lb64 = 0.0;
+    for (size_t k = 0; k < nk; ++k)
+      lb64 += inst.commodities[k].demand * dists[k];
+    for (size_t a = 0; a < m; ++a)
+      if (inst.arcs[a].capacitated()) lb64 -= lambda_at_best_lb[a] * inst.arcs[a].cap;
+    if (opt.verbose)
+      std::printf("fp64 certification: fp32 lb %.6f -> certified lb %.6f\n",
+                  res.best_lb, lb64);
+    res.best_lb = lb64;
+  }
+#endif
 
   // Final primal refresh with the last multipliers.
   res.best_ub = std::min(res.best_ub, primal_heuristic(inst, g, lambda));
