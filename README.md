@@ -152,6 +152,20 @@ Facility *serving* capacity is native in the solver (`design --hub-cap`,
 with demand-weighted POIs via a second column in the pois file and
 `--demand-transit` for upper tiers whose demand sits on street cabinets).
 
+Full-city SF (54,921 Overture address points, all three tiers):
+
+| tier | facilities | cable | cost |
+|------|-----------:|------:|-----:|
+| terminal (≤12) | 11,050 | 1,811 km | 23,636,163 |
+| FDH (≤512) | 206 | 619 km | 10,305,137 |
+| OLT (≤4000) | 24 | 109 km | 3,491,579 |
+| **chain total** | | 2,539 km | **37,432,879** (~682/address) |
+
+Run it yourself with `notebooks/arcedge_ftth_sf_colab.ipynb` (Colab, CPU
+runtime): upload the Overture places parquet, edit the cost/capacity
+parameters, and it compiles, solves the chain, tabulates metrics, exports
+per-tier GeoParquet, and draws the network map.
+
 ## Solution output: GeoParquet
 
 Both solvers export their solutions, and

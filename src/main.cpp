@@ -178,7 +178,7 @@ int run_design(int argc, char** argv) {
     out << std::setprecision(15);
     out << "hubs " << res.hubs << "\ncable_m " << res.cable_m << "\nhub_cost "
         << res.hub_cost << "\ncable_cost " << res.cable_cost << "\ntotal_cost "
-        << res.total_cost << "\n";
+        << res.total_cost << "\nms " << res.millis << "\n";
     out << "hub_nodes";
     for (int32_t h : res.hub_nodes) out << ' ' << h;
     out << "\n";

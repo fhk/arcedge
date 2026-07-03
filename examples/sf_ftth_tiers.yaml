@@ -1,0 +1,41 @@
+# Full-city San Francisco FTTH hierarchy on Overture data:
+# 1 address point -> terminal (<= 12) -> FDH (<= 512) -> OLT (<= 4000).
+# The addresses layer needs the Overture places GeoParquet (not committed);
+# point `geoparquet:` at your local copy, or run
+# notebooks/arcedge_ftth_sf_colab.ipynb which handles the upload.
+#
+#   python3 scripts/arcedge_modelc.py examples/sf_ftth_tiers.yaml -o out/sf_ftth --solve
+model_version: 1
+name: sf-ftth-tiers
+
+layers:
+  streets:
+    source: { file: data/sf_streets.graph }
+  addresses:
+    source: { geoparquet: places_sf.parquet }
+    role: terminals
+
+couplings:
+  - name: drops
+    from: addresses
+    to: streets
+    method: nearest_edge_split
+    snap_m: 0.5
+
+facilities:
+  terminal:
+    open_cost: 500
+    capacity: { hard: 12 }
+  fdh:
+    open_cost: 20000
+    capacity: { hard: 512 }
+  olt:
+    open_cost: 100000
+    capacity: { hard: 4000 }
+
+cable:
+  fixed_cost_per_m: 10
+
+commodities:
+  - name: service
+    assignment: { from: { nodes: { layer: addresses } }, demand: 1, tier: terminal }

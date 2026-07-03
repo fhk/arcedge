@@ -201,9 +201,12 @@ bool route_repair(const Net& net, const std::vector<int32_t>& pois,
     if (overloaded.empty() && hub_relief.empty()) return true;
     std::sort(overloaded.rbegin(), overloaded.rend());
     std::sort(hub_relief.rbegin(), hub_relief.rend());
+    // A quarter of the candidates per round tempers overshoot; the absolute
+    // cap scales up for high-density tiers (thousands of small facilities)
+    // where 64/round cannot converge within the round limit.
     const int n_cand =
         static_cast<int>(overloaded.size() + hub_relief.size());
-    const int per_round = std::max(1, std::min(64, n_cand / 4));
+    const int per_round = std::max(1, std::min(1024, n_cand / 4));
     int added = 0;
     for (const auto& [sv, relief] : hub_relief) {
       if (added >= per_round) break;
@@ -407,9 +410,31 @@ Eval evaluate(const Net& net, const std::vector<int32_t>& pois,
 }
 
 // Seeds k hubs by k-means over POI coordinates, mapping each centroid to the
-// nearest non-POI node.
+// nearest non-POI node. For large k the O(k * n) k-means/mapping cost is not
+// worth it (repair, recentering and pruning dominate placement anyway), so
+// hubs seed O(k) at the street-side neighbors of random distinct POIs.
 std::vector<int32_t> seed_hubs(const Net& net, const std::vector<int32_t>& pois,
                                int k, std::mt19937& rng) {
+  if (k > 512) {
+    std::set<int32_t> hubset;
+    std::uniform_int_distribution<size_t> pdist(0, pois.size() - 1);
+    for (int guard = 0; static_cast<int>(hubset.size()) < k && guard < 8 * k;
+         ++guard) {
+      const int32_t poi = pois[pdist(rng)];
+      // A POI's first neighbor is its drop foot (a street node); if demand
+      // sits directly on street nodes, the node itself serves.
+      int32_t site = poi;
+      if (net.is_poi[static_cast<size_t>(poi)]) {
+        const int32_t deg_off = net.adj_off[static_cast<size_t>(poi)];
+        if (deg_off < net.adj_off[static_cast<size_t>(poi) + 1])
+          site = net.adj_nbr[static_cast<size_t>(deg_off)];
+        else
+          continue;
+      }
+      if (!net.is_poi[static_cast<size_t>(site)]) hubset.insert(site);
+    }
+    return std::vector<int32_t>(hubset.begin(), hubset.end());
+  }
   std::vector<size_t> pick(static_cast<size_t>(k));
   std::uniform_int_distribution<size_t> pdist(0, pois.size() - 1);
   for (auto& s : pick) s = pdist(rng);
@@ -540,7 +565,10 @@ DesignResult design(const StreetGraph& g, const std::vector<int32_t>& pois,
     Forest f;
     std::vector<int32_t> hubs = seed_hubs(net, pois, k, rng);
     Eval ev = evaluate(net, pois, dem, hubs, p, f, consolidate);
-    for (int round = 0; round < 2 && ev.feasible; ++round) {
+    // Recentering is O(hubs * n); at high hub density placement is already
+    // near-nodal and repair/prune dominate, so skip it there.
+    for (int round = 0; round < 2 && ev.feasible && ev.hubs.size() <= 1024;
+         ++round) {
       std::vector<int32_t> moved = recenter(net, pois, ev.hubs, f);
       Eval ev2 = evaluate(net, pois, dem, std::move(moved), p, f, consolidate);
       if (ev2.feasible && ev2.cost < ev.cost) ev = std::move(ev2);

@@ -64,7 +64,8 @@ def write_geoparquet(path, columns, geoms):
 
 def run_design(args):
     nodes, edge_len = read_graph(args.graph)
-    poi_set = set(int(l) for l in open(args.pois))
+    # pois files may carry a demand column: <node-id> [demand]
+    poi_set = set(int(l.split()[0]) for l in open(args.pois) if l.strip())
     hubs, used, assign = [], [], []
     with open(args.solution) as f:
         for line in f:
