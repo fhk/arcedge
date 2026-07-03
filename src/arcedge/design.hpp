@@ -16,6 +16,11 @@ struct DesignParams {
   bool verbose = true;
 };
 
+struct DesignUsedEdge {
+  int32_t u = 0, v = 0;  // node ids in the input street graph
+  double load = 0.0;     // demand units carried (POI count)
+};
+
 struct DesignResult {
   int hubs = 0;
   double cable_m = 0.0;
@@ -24,6 +29,8 @@ struct DesignResult {
   double total_cost = 0.0;
   bool feasible = false;
   std::vector<int32_t> hub_nodes;
+  std::vector<DesignUsedEdge> used_edges;  // every edge carrying flow
+  std::vector<int32_t> poi_hub;            // serving hub per input POI
 };
 
 // Capacitated hub-location / fixed-charge access network design: open hubs

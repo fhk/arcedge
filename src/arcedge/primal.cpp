@@ -9,12 +9,14 @@ namespace {
 
 // Routes all commodities in the residual network with the given arc costs.
 // Returns the true (unpenalized) cost of the routing, or kInf on failure.
+// `flow` (if non-null) receives the per-arc flow of the routing.
 double route_all(const Instance& inst, const Graph& g, std::vector<double> cost,
-                 const std::vector<size_t>& order) {
+                 const std::vector<size_t>& order, std::vector<double>* flow) {
   const size_t m = inst.arcs.size();
   std::vector<double> residual(m);
   for (size_t a = 0; a < m; ++a)
     residual[a] = inst.arcs[a].capacitated() ? inst.arcs[a].cap : kInf;
+  if (flow) flow->assign(m, 0.0);
 
   SpBuffers buf;
   std::vector<int32_t> path;
@@ -37,6 +39,7 @@ double route_all(const Instance& inst, const Graph& g, std::vector<double> cost,
       for (int32_t a : path) {
         const Arc& arc = inst.arcs[static_cast<size_t>(a)];
         total += push * arc.cost;
+        if (flow) (*flow)[static_cast<size_t>(a)] += push;
         if (arc.capacitated()) {
           residual[static_cast<size_t>(a)] -= push;
           if (residual[static_cast<size_t>(a)] <= 1e-9)
@@ -52,7 +55,8 @@ double route_all(const Instance& inst, const Graph& g, std::vector<double> cost,
 }  // namespace
 
 double primal_heuristic(const Instance& inst, const Graph& g,
-                        const std::vector<double>& lambda) {
+                        const std::vector<double>& lambda,
+                        std::vector<double>* flow_out) {
   const size_t m = inst.arcs.size();
   const size_t nk = inst.commodities.size();
 
@@ -70,8 +74,16 @@ double primal_heuristic(const Instance& inst, const Graph& g,
     pure[a] = inst.arcs[a].cost;
     guided[a] = inst.arcs[a].cost + lambda[a];
   }
-  const double ub_guided = route_all(inst, g, std::move(guided), order);
-  const double ub_pure = route_all(inst, g, std::move(pure), order);
+  std::vector<double> flow_guided, flow_pure;
+  const double ub_guided = route_all(inst, g, std::move(guided), order,
+                                     flow_out ? &flow_guided : nullptr);
+  const double ub_pure = route_all(inst, g, std::move(pure), order,
+                                   flow_out ? &flow_pure : nullptr);
+  if (flow_out) {
+    if (ub_guided <= ub_pure && ub_guided < kInf) *flow_out = std::move(flow_guided);
+    else if (ub_pure < kInf) *flow_out = std::move(flow_pure);
+    else flow_out->clear();
+  }
   return std::min(ub_guided, ub_pure);
 }
 

@@ -120,8 +120,19 @@ struct Eval {
   double cost = kInfD;
   double cable_m = 0.0;
   std::vector<int32_t> hubs;
+  std::vector<DesignUsedEdge> used;  // edges with load > 0
+  std::vector<int32_t> poi_hub;      // serving hub per POI index
   bool feasible = false;
 };
+
+std::vector<DesignUsedEdge> used_from_loads(const Net& net,
+                                            const std::vector<double>& load) {
+  std::vector<DesignUsedEdge> used;
+  for (size_t e = 0; e < load.size(); ++e)
+    if (load[e] > 0.0)
+      used.push_back({net.eu[e], net.ev[e], load[e]});
+  return used;
+}
 
 // Routes all POIs on the forest metric until capacity holds, opening relief
 // hubs at the congested side of overloaded edges. Fills `load`; returns false
@@ -165,9 +176,9 @@ bool route_repair(const Net& net, const std::vector<int32_t>& pois,
 // -1 if some POI cannot be routed within its cluster's capacity.
 double sph_consolidate(const Net& net, const std::vector<int32_t>& pois,
                        const std::vector<int32_t>& hubs, const Forest& f,
-                       const DesignParams& p) {
+                       const DesignParams& p, std::vector<double>& load) {
   const size_t m = net.elen.size();
-  std::vector<double> load(m, 0.0);
+  load.assign(m, 0.0);
   std::vector<char> tree_edge(m, 0);
   std::vector<double> dist(static_cast<size_t>(net.n));
   std::vector<int32_t> pe(static_cast<size_t>(net.n)), pn(static_cast<size_t>(net.n));
@@ -253,12 +264,18 @@ Eval evaluate(const Net& net, const std::vector<int32_t>& pois,
   ev.cost = p.hub_cost * static_cast<double>(hubs.size()) +
             p.cable_cost_per_m * cable;
   ev.feasible = true;
+  ev.used = used_from_loads(net, load);
+  ev.poi_hub.resize(pois.size());
+  for (size_t i = 0; i < pois.size(); ++i)
+    ev.poi_hub[i] = f.hub_of[static_cast<size_t>(pois[i])];
   if (consolidate) {
-    const double sph_cable = sph_consolidate(net, pois, hubs, f, p);
+    std::vector<double> sph_load;
+    const double sph_cable = sph_consolidate(net, pois, hubs, f, p, sph_load);
     if (sph_cable >= 0.0 && sph_cable < ev.cable_m) {
       ev.cable_m = sph_cable;
       ev.cost = p.hub_cost * static_cast<double>(hubs.size()) +
                 p.cable_cost_per_m * sph_cable;
+      ev.used = used_from_loads(net, sph_load);
     }
   }
   ev.hubs = std::move(hubs);
@@ -414,6 +431,8 @@ DesignResult design(const StreetGraph& g, const std::vector<int32_t>& pois,
   res.cable_cost = p.cable_cost_per_m * best.cable_m;
   res.total_cost = best.cost;
   res.hub_nodes = best.hubs;
+  res.used_edges = std::move(best.used);
+  res.poi_hub = std::move(best.poi_hub);
   return res;
 }
 

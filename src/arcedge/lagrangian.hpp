@@ -32,6 +32,9 @@ struct SolveResult {
   double gap = 0.0;  // (best_ub - best_lb) / best_ub
   int iters = 0;
   double millis = 0.0;
+  // Per-arc flow of the solution that achieved best_ub (demand units).
+  // Empty when no feasible flow was found or the primal was disabled.
+  std::vector<double> flow;
 };
 
 // Lagrangian relaxation of capacitated MCF: capacity constraints are dualized,

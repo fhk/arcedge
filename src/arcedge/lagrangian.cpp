@@ -87,7 +87,17 @@ SolveResult solve(const Instance& inst, const SolveOptions& opt) {
 
   SolveResult res;
   res.best_lb = -kInf;
-  res.best_ub = opt.primal ? primal_heuristic(inst, g, lambda) : kInf;
+  res.best_ub = kInf;
+  // Runs the primal heuristic and keeps the flow behind every UB improvement.
+  auto refresh_ub = [&](const std::vector<double>& lam) {
+    std::vector<double> flow;
+    const double ub = primal_heuristic(inst, g, lam, &flow);
+    if (ub < res.best_ub) {
+      res.best_ub = ub;
+      res.flow = std::move(flow);
+    }
+  };
+  if (opt.primal) refresh_ub(lambda);
   if (opt.verbose && opt.primal)
     std::printf("initial primal ub = %.4f\n", res.best_ub);
 
@@ -151,8 +161,7 @@ SolveResult solve(const Instance& inst, const SolveOptions& opt) {
           load[static_cast<size_t>(a)] += inst.commodities[k].demand;
     }
 
-    if (opt.primal && iter % opt.primal_every == 0)
-      res.best_ub = std::min(res.best_ub, primal_heuristic(inst, g, lambda));
+    if (opt.primal && iter % opt.primal_every == 0) refresh_ub(lambda);
 
     res.gap = (res.best_ub > 0 && res.best_ub < kInf)
                   ? (res.best_ub - res.best_lb) / res.best_ub
@@ -181,7 +190,10 @@ SolveResult solve(const Instance& inst, const SolveOptions& opt) {
       // load is the demand-weighted flow, so its true cost is the UB.
       double ub = 0.0;
       for (size_t a = 0; a < m; ++a) ub += load[a] * inst.arcs[a].cost;
-      res.best_ub = std::min(res.best_ub, ub);
+      if (ub < res.best_ub) {
+        res.best_ub = ub;
+        res.flow = load;
+      }
       res.gap = (res.best_ub - res.best_lb) / std::max(res.best_ub, 1e-12);
       break;
     }
@@ -216,8 +228,7 @@ SolveResult solve(const Instance& inst, const SolveOptions& opt) {
 #endif
 
   // Final primal refresh with the last multipliers.
-  if (opt.primal)
-    res.best_ub = std::min(res.best_ub, primal_heuristic(inst, g, lambda));
+  if (opt.primal) refresh_ub(lambda);
   res.gap = (res.best_ub > 0 && res.best_ub < kInf)
                 ? (res.best_ub - res.best_lb) / res.best_ub
                 : kInf;

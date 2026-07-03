@@ -23,10 +23,10 @@ void usage() {
       "              [--hubs N] [--hub-frac X] [--wait-cost X] [--seed N]\n"
       "  arcedge solve INSTANCE [--iters N] [--tol X] [--threads N]\n"
       "              [--primal-every N] [--sp-backend auto|dijkstra|dag|cuda]\n"
-      "              [--result FILE] [--quiet]\n"
+      "              [--result FILE] [--flow FILE] [--no-primal] [--quiet]\n"
       "  arcedge design --graph FILE --pois FILE [--cap X] [--hub-cost X]\n"
       "              [--cable-cost X] [--max-k N] [--seed N] [--result FILE]\n"
-      "              [--quiet]\n");
+      "              [--solution FILE] [--quiet]\n");
 }
 
 bool arg_match(int argc, char** argv, int& i, const char* name, std::string& out) {
@@ -74,7 +74,7 @@ int run_solve(int argc, char** argv) {
   const std::string inst_path = argv[2];
   arcedge::SolveOptions opt;
   opt.threads = static_cast<int>(std::thread::hardware_concurrency());
-  std::string result_path, v;
+  std::string result_path, flow_path, v;
   for (int i = 3; i < argc; ++i) {
     if (arg_match(argc, argv, i, "--iters", v)) opt.max_iters = std::stoi(v);
     else if (arg_match(argc, argv, i, "--tol", v)) opt.gap_tol = std::stod(v);
@@ -82,6 +82,7 @@ int run_solve(int argc, char** argv) {
     else if (arg_match(argc, argv, i, "--primal-every", v)) opt.primal_every = std::stoi(v);
     else if (arg_match(argc, argv, i, "--sp-backend", v)) opt.sp_backend = v;
     else if (arg_match(argc, argv, i, "--result", v)) result_path = v;
+    else if (arg_match(argc, argv, i, "--flow", v)) flow_path = v;
     else if (std::strcmp(argv[i], "--quiet") == 0) opt.verbose = false;
     else if (std::strcmp(argv[i], "--no-primal") == 0) opt.primal = false;
     else { std::fprintf(stderr, "unknown option: %s\n", argv[i]); return 2; }
@@ -99,14 +100,30 @@ int run_solve(int argc, char** argv) {
     out << "lb " << res.best_lb << "\nub " << res.best_ub << "\ngap " << res.gap
         << "\niters " << res.iters << "\nms " << res.millis << "\n";
   }
+  if (!flow_path.empty()) {
+    if (res.flow.empty()) {
+      std::fprintf(stderr, "no feasible flow to write to %s\n", flow_path.c_str());
+    } else {
+      std::ofstream out(flow_path);
+      out << std::setprecision(15);
+      out << "c arcedge flow: per-arc flow of the best_ub solution\n";
+      size_t nz = 0;
+      for (double f : res.flow) nz += f > 1e-9;
+      out << "f " << res.flow.size() << ' ' << nz << '\n';
+      for (size_t a = 0; a < res.flow.size(); ++a)
+        if (res.flow[a] > 1e-9) out << "a " << a << ' ' << res.flow[a] << '\n';
+      std::printf("wrote %s: %zu arcs with flow\n", flow_path.c_str(), nz);
+    }
+  }
   return res.best_ub < arcedge::kInf ? 0 : 1;
 }
 
 int run_design(int argc, char** argv) {
   arcedge::DesignParams p;
-  std::string graph_path, pois_path, result_path, v;
+  std::string graph_path, pois_path, result_path, solution_path, v;
   for (int i = 2; i < argc; ++i) {
     if (arg_match(argc, argv, i, "--graph", v)) graph_path = v;
+    else if (arg_match(argc, argv, i, "--solution", v)) solution_path = v;
     else if (arg_match(argc, argv, i, "--pois", v)) pois_path = v;
     else if (arg_match(argc, argv, i, "--cap", v)) p.edge_cap = std::stod(v);
     else if (arg_match(argc, argv, i, "--hub-cost", v)) p.hub_cost = std::stod(v);
@@ -147,6 +164,20 @@ int run_design(int argc, char** argv) {
     out << "hub_nodes";
     for (int32_t h : res.hub_nodes) out << ' ' << h;
     out << "\n";
+  }
+  if (!solution_path.empty()) {
+    std::ofstream out(solution_path);
+    out << std::setprecision(15);
+    out << "c arcedge design solution: h <hub-node>; e <u> <v> <load>; "
+           "p <poi-node> <serving-hub-node>\n";
+    for (int32_t h : res.hub_nodes) out << "h " << h << '\n';
+    for (const arcedge::DesignUsedEdge& e : res.used_edges)
+      out << "e " << e.u << ' ' << e.v << ' ' << e.load << '\n';
+    for (size_t i = 0; i < pois.size(); ++i)
+      out << "p " << pois[i] << ' ' << res.poi_hub[i] << '\n';
+    std::printf("wrote %s: %d hubs, %zu used edges, %zu POI assignments\n",
+                solution_path.c_str(), res.hubs, res.used_edges.size(),
+                pois.size());
   }
   return 0;
 }

@@ -107,6 +107,33 @@ Results with capacity 500, hub cost 20,000, cable cost 10/m:
 (Full-city cable = 1,131 km of mandatory POI drops + ~1,021 km of shared
 street cable, 49 % of the 2,102 km street network.)
 
+## Solution output: GeoParquet
+
+Both solvers export their solutions, and
+`scripts/solution_to_geoparquet.py` maps them back onto the original street
+geometry (WGS84 lon/lat) as GeoParquet that opens directly in QGIS,
+geopandas, or DuckDB spatial:
+
+```bash
+# hub design: hubs (Point), cable + drops (LineString w/ load, length), POIs
+./build/arcedge design --graph data/sf_access.graph --pois data/sf_access.pois \
+    --cap 500 --hub-cost 20000 --cable-cost 10 --solution data/sf_design.solution
+python3 scripts/solution_to_geoparquet.py design \
+    --graph data/sf_access.graph --pois data/sf_access.pois \
+    --solution data/sf_design.solution --out data/sf_design.parquet
+
+# time-expanded MCF: per-arc flows aggregated over all time layers back onto
+# street edges (kind=street_flow) and waiting nodes (kind=wait)
+./build/arcedge solve data/sf_te.txt --flow data/sf_te.flow --result data/sf_te.result
+python3 scripts/solution_to_geoparquet.py flow \
+    --street data/sf_streets.graph --instance data/sf_te.txt \
+    --flow data/sf_te.flow --out data/sf_flow.parquet --check-ub data/sf_te.result
+```
+
+The exports are self-verifying: flow mode checks `sum(flow x cost)` equals
+the solver's reported upper bound exactly, and design mode's mapped cable
+length must match the solver's `cable_m`.
+
 ## Stage 2: shortest-path backends & GPU
 
 The Lagrangian subproblem runs on a pluggable backend
