@@ -7,6 +7,7 @@
 #   (pip install highspy numpy).
 set -euo pipefail
 cd "$(dirname "$0")/.."
+export PYTHONUNBUFFERED=1  # progress must stream when piped (Colab, CI)
 
 echo "=== [1/8] build ==="
 cmake -B build -DCMAKE_BUILD_TYPE=Release >/dev/null
@@ -60,8 +61,10 @@ echo "=== [8/8] downtown SF hub design (POI access network) vs HiGHS MIP ==="
 ./build/arcedge design --graph data/sf_dt_access.graph \
   --pois data/sf_dt_access.pois --cap 500 --hub-cost 20000 --cable-cost 10 \
   --quiet --result data/sf_dt_design.result
+# The MIP reference typically runs to its time limit before printing the
+# verdict -- that's HiGHS proving a bound, not a hang.
 python3 scripts/validate_design_mip.py data/sf_dt_access.graph \
-  data/sf_dt_access.pois data/sf_dt_design.result --time-limit 240
+  data/sf_dt_access.pois data/sf_dt_design.result --time-limit 120
 
 echo
 echo "E2E PASSED: unit tests green, HiGHS confirms lb <= LP* <= ub on"

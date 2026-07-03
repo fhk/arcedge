@@ -43,6 +43,8 @@ def main():
     ap.add_argument("--cable-cost", type=float, default=10.0)
     ap.add_argument("--time-limit", type=float, default=300.0)
     ap.add_argument("--mip-gap", type=float, default=0.005)
+    ap.add_argument("--quiet", action="store_true",
+                    help="suppress the HiGHS branch-and-bound log")
     args = ap.parse_args()
 
     num_nodes, edge_items = read_graph(args.graph)
@@ -107,8 +109,14 @@ def main():
     ub[y0:y0 + m] = 1.0
     ub[z0:z0 + n] = 1.0
 
+    print(f"building MIP reference: {2 * m + n} flow/absorption cols, "
+          f"{m} edge binaries, {n} hub binaries", flush=True)
+    print(f"solving with HiGHS (time limit {args.time_limit:.0f} s, "
+          f"gap target {100 * args.mip_gap:.1f}%) -- branch-and-bound log follows",
+          flush=True)
     h = highspy.Highs()
-    h.silent()
+    if args.quiet:
+        h.silent()
     h.addRows(nrow, row_lb, row_ub, 0,
               np.zeros(0, dtype=np.int64), np.zeros(0, dtype=np.int32), np.zeros(0))
     starts = np.zeros(ncol, dtype=np.int64)
