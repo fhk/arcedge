@@ -167,9 +167,10 @@ Full-city SF (54,921 Overture address points, `--rounds 3`):
 | OLT (≤4000) | 24 | 112 km | 3,516,854 |
 | **chain total** | | 2,540 km | **36,839,982** (~671/address; greedy chain was 37,432,879 — joint feedback saves 1.6%) |
 
-Wall-clock for all three rounds: **81 s** on a 48-vCPU EPYC (Colab GPU-class
-runtime; benchmark notebook below), ~30 min on a 4-core box — identical
-solutions on both.
+Wall-clock for all three rounds: **~45 s on a 4-core box** after the R3-2b
+serial-path optimizations (subtree load aggregation + incremental forest
+updates: 53 → 15 s/round); the 48-vCPU EPYC benchmark predates them at 81 s
+total and should now land well under a minute.
 
 Run it yourself with `notebooks/arcedge_ftth_sf_colab.ipynb` (Colab, CPU
 runtime): upload the Overture places parquet, edit the cost/capacity

@@ -389,18 +389,21 @@ the parallel phases (k-sweep, per-cluster SPH) are done; the critical path
 is now the *serial* repair/prune chains inside each evaluation. CPU fixes,
 in expected-value order:
 
-1. **Subtree load aggregation** — replace per-POI path walks
-   (Σ path-lengths ≈ 5.5M steps/round at 55k POIs) with reverse
-   Dijkstra-order accumulation, O(n+m) ≈ 230k. The walk currently costs as
-   much as the Dijkstra itself.
-2. **Incremental grow_forest during repair** — relief hubs only lower
-   distances locally; seed the new hubs and relax outward instead of
-   rebuilding the whole forest each round (10–50× less Dijkstra work).
+1. **Subtree load aggregation** — **DONE**: per-POI path walks
+   (Σ path-lengths ≈ 5.5M steps/round at 55k POIs) replaced with Kahn
+   leaf-inward accumulation over the forest, O(n+m) ≈ 230k; subtree[hub]
+   doubles as the hub's served demand for free.
+2. **Incremental grow_forest during repair** — **DONE**: relief hubs only
+   lower distances, so rounds after the first seed just the new hubs and
+   relax outward (`grow_forest_add`), touching only the affected region;
+   reachability is checked once (it can only improve).
+   **Measured (1+2): full-SF chain 53 → 15 s/round on the 4-core box
+   (3.5×), solution within +0.05% of the previous result (incremental
+   tie-breaking).** Extrapolated EPYC-48 round: ~7–10 s.
 3. **Parallel prune probing** — the prune loop is ~30 *sequential* cheap
-   evaluations; batch-test candidate drops concurrently.
+   evaluations; batch-test candidate drops concurrently. (pending)
 4. Dial's/bucket priority queue for the meter-weighted Dijkstras (2–3×
-   constant factor).
-Compound estimate: another 3–5× ⇒ city-scale round ≈ 5–10 s on a big box.
+   constant factor). (pending)
 
 **GPU for the design chain: not worth it now.** The kernel is multi-source
 Dijkstra on a *general* (cyclic) 107k-node street graph — the MCF backend's

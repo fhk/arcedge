@@ -123,6 +123,44 @@ void grow_forest(const Net& net, const std::vector<int32_t>& hubs, Forest& f,
   }
 }
 
+// Incremental forest update: relief repair only ADDS hubs, and new zero-cost
+// sources can only lower distances, so seeding just the new hubs and
+// relaxing outward against the existing labels yields the exact new
+// shortest-path forest while touching only the affected region.
+void grow_forest_add(const Net& net, const std::vector<int32_t>& new_hubs,
+                     Forest& f, const std::vector<double>* edge_cost = nullptr) {
+  using Item = std::pair<double, int32_t>;
+  std::priority_queue<Item, std::vector<Item>, std::greater<Item>> pq;
+  for (int32_t h : new_hubs) {
+    f.dist[static_cast<size_t>(h)] = 0.0;
+    f.hub_of[static_cast<size_t>(h)] = h;
+    f.parent_edge[static_cast<size_t>(h)] = -1;
+    f.parent_node[static_cast<size_t>(h)] = -1;
+    pq.emplace(0.0, h);
+  }
+  while (!pq.empty()) {
+    auto [d, u] = pq.top();
+    pq.pop();
+    if (d > f.dist[static_cast<size_t>(u)]) continue;
+    if (net.is_poi[static_cast<size_t>(u)]) continue;  // leaf: no transit
+    for (int32_t i = net.adj_off[static_cast<size_t>(u)];
+         i < net.adj_off[static_cast<size_t>(u) + 1]; ++i) {
+      const int32_t v = net.adj_nbr[static_cast<size_t>(i)];
+      const int32_t e = net.adj_edge[static_cast<size_t>(i)];
+      const double w = edge_cost ? (*edge_cost)[static_cast<size_t>(e)]
+                                 : net.elen[static_cast<size_t>(e)];
+      const double nd = d + w;
+      if (nd < f.dist[static_cast<size_t>(v)]) {
+        f.dist[static_cast<size_t>(v)] = nd;
+        f.parent_edge[static_cast<size_t>(v)] = e;
+        f.parent_node[static_cast<size_t>(v)] = u;
+        f.hub_of[static_cast<size_t>(v)] = f.hub_of[static_cast<size_t>(u)];
+        pq.emplace(nd, v);
+      }
+    }
+  }
+}
+
 struct Eval {
   double cost = kInfD;
   double cable_m = 0.0;
@@ -149,7 +187,16 @@ bool route_repair(const Net& net, const std::vector<int32_t>& pois,
                   const DesignParams& p, Forest& f,
                   const std::vector<double>* edge_cost, std::vector<double>& load) {
   std::set<int32_t> hub_set(hubs.begin(), hubs.end());
-  std::vector<double> served(static_cast<size_t>(net.n), 0.0);
+  const size_t n = static_cast<size_t>(net.n);
+  // Per-node demand, fixed across rounds.
+  std::vector<double> node_dem(n, 0.0);
+  for (size_t i = 0; i < pois.size(); ++i)
+    node_dem[static_cast<size_t>(pois[i])] += dem[i];
+  std::vector<double> subtree(n);
+  std::vector<int32_t> childcnt(n);
+  std::vector<int32_t> kahn;
+  kahn.reserve(n);
+  std::vector<int32_t> added;
   // Batched relief: a fraction of the overloaded funnels get relief hubs
   // per round (worst first), so rounds scale roughly logarithmically in the
   // relief count instead of linearly (one-per-round was the measured
@@ -157,17 +204,37 @@ bool route_repair(const Net& net, const std::vector<int32_t>& pois,
   // fraction per round lets the forest re-balance between additions, which
   // keeps the realized hub count lean.
   for (int repair = 0; repair < 200; ++repair) {
-    grow_forest(net, hubs, f, edge_cost);
-    std::fill(load.begin(), load.end(), 0.0);
-    std::fill(served.begin(), served.end(), 0.0);
-    for (size_t i = 0; i < pois.size(); ++i) {
-      const int32_t poi = pois[i];
-      if (f.hub_of[static_cast<size_t>(poi)] < 0) return false;  // disconnected
-      served[static_cast<size_t>(f.hub_of[static_cast<size_t>(poi)])] += dem[i];
-      for (int32_t v = poi; f.parent_edge[static_cast<size_t>(v)] >= 0;
-           v = f.parent_node[static_cast<size_t>(v)])
-        load[static_cast<size_t>(f.parent_edge[static_cast<size_t>(v)])] += dem[i];
+    if (repair == 0) {
+      grow_forest(net, hubs, f, edge_cost);
+      // Reachability can only improve as hubs are added: check once.
+      for (int32_t poi : pois)
+        if (f.hub_of[static_cast<size_t>(poi)] < 0) return false;
+    } else {
+      grow_forest_add(net, added, f, edge_cost);
     }
+    // Edge loads and per-hub service by subtree aggregation over the forest
+    // (Kahn from the leaves inward): O(n + m) instead of walking every
+    // POI's path to its hub, and after aggregation subtree[hub] IS the
+    // demand that hub serves.
+    std::fill(load.begin(), load.end(), 0.0);
+    std::copy(node_dem.begin(), node_dem.end(), subtree.begin());
+    std::fill(childcnt.begin(), childcnt.end(), 0);
+    for (size_t v = 0; v < n; ++v)
+      if (f.parent_edge[v] >= 0)
+        childcnt[static_cast<size_t>(f.parent_node[v])]++;
+    kahn.clear();
+    for (size_t v = 0; v < n; ++v)
+      if (childcnt[v] == 0 && f.dist[v] < kInfD)
+        kahn.push_back(static_cast<int32_t>(v));
+    for (size_t qi = 0; qi < kahn.size(); ++qi) {
+      const size_t v = static_cast<size_t>(kahn[qi]);
+      if (f.parent_edge[v] < 0) continue;  // hub root
+      load[static_cast<size_t>(f.parent_edge[v])] = subtree[v];
+      const size_t pv = static_cast<size_t>(f.parent_node[v]);
+      subtree[pv] += subtree[v];
+      if (--childcnt[pv] == 0) kahn.push_back(static_cast<int32_t>(pv));
+    }
+    const std::vector<double>& served = subtree;  // valid at hub roots
     std::vector<std::pair<double, int32_t>> overloaded;  // (load, edge)
     std::vector<char> is_over(load.size(), 0);
     if (p.edge_cap > 0.0)
@@ -207,16 +274,16 @@ bool route_repair(const Net& net, const std::vector<int32_t>& pois,
     const int n_cand =
         static_cast<int>(overloaded.size() + hub_relief.size());
     const int per_round = std::max(1, std::min(1024, n_cand / 4));
-    int added = 0;
+    added.clear();  // this round's new hubs, seeds for the incremental update
     for (const auto& [sv, relief] : hub_relief) {
-      if (added >= per_round) break;
+      if (static_cast<int>(added.size()) >= per_round) break;
       if (hub_set.insert(relief).second) {
         hubs.push_back(relief);
-        ++added;
+        added.push_back(relief);
       }
     }
     for (const auto& [ld, e] : overloaded) {
-      if (added >= per_round) break;
+      if (static_cast<int>(added.size()) >= per_round) break;
       const int32_t u = net.eu[static_cast<size_t>(e)];
       const int32_t v = net.ev[static_cast<size_t>(e)];
       const bool u_far = f.parent_edge[static_cast<size_t>(u)] == e;
@@ -235,10 +302,10 @@ bool route_repair(const Net& net, const std::vector<int32_t>& pois,
       if (has_over_ancestor) continue;
       if (hub_set.insert(relief).second) {
         hubs.push_back(relief);
-        ++added;
+        added.push_back(relief);
       }
     }
-    if (added == 0) return false;  // overloaded but no new relief site
+    if (added.empty()) return false;  // overloaded but no new relief site
   }
   return false;
 }
