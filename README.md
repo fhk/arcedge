@@ -152,14 +152,20 @@ Facility *serving* capacity is native in the solver (`design --hub-cap`,
 with demand-weighted POIs via a second column in the pois file and
 `--demand-transit` for upper tiers whose demand sits on street cabinets).
 
-Full-city SF (54,921 Overture address points, all three tiers):
+The chain is greedy per tier by default; `--rounds N` adds **joint
+feedback**: each round re-places lower tiers with their open costs inflated
+by the *measured* marginal upper-tier cable per facility from the previous
+round, and the best chain by true cost wins (never worse than greedy —
+asserted in E2E).
+
+Full-city SF (54,921 Overture address points, `--rounds 3`):
 
 | tier | facilities | cable | cost |
 |------|-----------:|------:|-----:|
-| terminal (≤12) | 11,050 | 1,811 km | 23,636,163 |
-| FDH (≤512) | 206 | 619 km | 10,305,137 |
-| OLT (≤4000) | 24 | 109 km | 3,491,579 |
-| **chain total** | | 2,539 km | **37,432,879** (~682/address) |
+| terminal (≤12) | 10,139 | 1,857 km | 23,635,692 |
+| FDH (≤512) | 199 | 571 km | 9,687,436 |
+| OLT (≤4000) | 24 | 112 km | 3,516,854 |
+| **chain total** | | 2,540 km | **36,839,982** (~671/address; greedy chain was 37,432,879 — joint feedback saves 1.6%) |
 
 Run it yourself with `notebooks/arcedge_ftth_sf_colab.ipynb` (Colab, CPU
 runtime): upload the Overture places parquet, edit the cost/capacity

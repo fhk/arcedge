@@ -91,8 +91,10 @@ python3 scripts/arcedge_modelc.py examples/sf_dt_te_mcf.yaml \
 ./build/arcedge solve out/dt_mcf/instance.txt --iters 300 --tol 0.005 \
   --quiet --result out/dt_mcf/result.txt
 # Multi-tier FTTH chain: 1 address -> terminal (12) -> FDH (512) -> OLT (4000)
+# with joint-feedback rounds (best chain by true cost can never be worse
+# than the greedy round-1 chain).
 python3 scripts/arcedge_modelc.py examples/sf_dt_ftth_tiers.yaml \
-  -o out/dt_ftth --solve
+  -o out/dt_ftth --solve --rounds 2
 python3 - <<'PYEOF'
 import json, math
 d = dict(l.split() for l in open('out/dt_design/result.txt')
@@ -106,6 +108,9 @@ tiers = {x['tier']: x for x in t['tiers']}
 assert tiers['terminal']['hubs'] >= math.ceil(400 / 12), 'terminal cap violated'
 assert tiers['fdh']['hubs'] >= 1 and tiers['olt']['hubs'] >= 1
 assert t['total_cost'] < 1e6, 'FTTH chain cost unreasonable'
+rounds = t['rounds']
+assert t['total_cost'] <= rounds[0]['total_cost'] + 1e-6, \
+    'joint feedback made the chain worse than greedy'
 print(f"model-config acceptance OK: design total {total:.0f} "
       f"(baseline 392123), mcf gap {100 * float(m['gap']):.3f}%, "
       f"ftth chain {tiers['terminal']['hubs']}t/{tiers['fdh']['hubs']}f/"

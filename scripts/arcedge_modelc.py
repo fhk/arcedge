@@ -391,34 +391,36 @@ def emit_design(out_dir, model, nodes, edges, edge_caps, poi_nodes,
 
 # ----------------------------------------------------------- tier chain ---
 
-def solve_design_chain(out_dir, artifacts, arcedge_bin):
-    """Runs the facility tiers bottom-up: each pass's opened hubs become the
-    next pass's demand points (demand = units served)."""
+def run_chain_once(out_dir, artifacts, arcedge_bin, open_adjust, tag):
+    """One bottom-up pass over the facility tiers: each tier's opened hubs
+    become the next tier's demand points (demand = units served).
+    `open_adjust[i]` inflates tier i's open cost for PLACEMENT only (the
+    joint feedback); reported costs are always the true (base) costs."""
     import subprocess
     graph = artifacts["graph"]
     pois_path = artifacts["pois"]
     passes = artifacts["passes"]
-    summary = {"tiers": [], "total_cost": 0.0}
+    tiers = []
     for i, ps in enumerate(passes):
-        result = out_dir / f"tier{i + 1}.result"
-        solution = out_dir / f"tier{i + 1}.solution"
+        result = out_dir / f"tier{i + 1}{tag}.result"
+        solution = out_dir / f"tier{i + 1}{tag}.solution"
+        eff_open = ps["hub_cost"] + open_adjust[i]
         cmd = [arcedge_bin, "design", "--graph", str(graph),
                "--pois", str(pois_path),
                "--cap", f"{ps['edge_cap']:g}", "--hub-cap", f"{ps['hub_cap']:g}",
-               "--hub-cost", f"{ps['hub_cost']:g}",
+               "--hub-cost", f"{eff_open:g}",
                "--cable-cost", f"{ps['cable_cost']:g}",
                "--quiet", "--result", str(result), "--solution", str(solution)]
         if ps["demand_transit"]:
             cmd.append("--demand-transit")
-        print(f"[tier {i + 1}/{len(passes)}: {ps['tier']}] "
-              f"hub_cap {ps['hub_cap']:g}, open {ps['hub_cost']:g}", flush=True)
         proc = subprocess.run(cmd, capture_output=True, text=True)
         if proc.returncode != 0:
             print(proc.stdout + proc.stderr, file=sys.stderr)
             fail(f"tier {ps['tier']} design failed")
         res = {k: float(v) for k, v in
                (l.split() for l in open(result) if not l.startswith("hub_nodes"))}
-        # Demands of this pass's POIs, to weight the next tier's demand.
+        true_cost = res["hubs"] * ps["hub_cost"] + \
+            res["cable_m"] * ps["cable_cost"]
         dem_of = {}
         for line in open(pois_path):
             parts = line.split()
@@ -430,24 +432,61 @@ def solve_design_chain(out_dir, artifacts, arcedge_bin):
             if parts and parts[0] == "p":
                 served[int(parts[2])] = served.get(int(parts[2]), 0.0) + \
                     dem_of.get(int(parts[1]), 1.0)
-        tier_sum = dict(tier=ps["tier"], hubs=int(res["hubs"]),
-                        cable_m=res["cable_m"], cost=res["total_cost"],
-                        result=str(result), solution=str(solution))
-        summary["tiers"].append(tier_sum)
-        summary["total_cost"] += res["total_cost"]
-        print(f"  -> {tier_sum['hubs']} {ps['tier']}(s), "
-              f"{tier_sum['cable_m']:.0f} m cable, cost {tier_sum['cost']:.0f}",
+        tiers.append(dict(tier=ps["tier"], hubs=int(res["hubs"]),
+                          cable_m=res["cable_m"], cost=true_cost,
+                          ms=res.get("ms", 0.0),
+                          open_adjust=open_adjust[i],
+                          result=str(result), solution=str(solution),
+                          pois=str(pois_path)))
+        print(f"  [{ps['tier']}] {int(res['hubs'])} facilities, "
+              f"{res['cable_m']:.0f} m, true cost {true_cost:.0f}"
+              + (f" (placement open +{open_adjust[i]:.0f})" if open_adjust[i] else ""),
               flush=True)
         if i + 1 < len(passes):
-            pois_path = out_dir / f"tier{i + 1}.pois"
+            pois_path = out_dir / f"tier{i + 1}{tag}.pois"
             with open(pois_path, "w") as f:
                 for hub, q in sorted(served.items()):
                     f.write(f"{hub} {q:g}\n")
-    json.dump(summary, open(out_dir / "tiers_summary.json", "w"), indent=2)
+    return {"tiers": tiers, "total_cost": sum(t["cost"] for t in tiers)}
+
+
+def solve_design_chain(out_dir, artifacts, arcedge_bin, rounds=1):
+    """Joint-aware chained solve. The greedy chain places each tier blind to
+    upper-tier cable; feedback rounds re-place tier i with its open cost
+    inflated by the MEASURED marginal upper-tier cable per facility from the
+    previous round (upper-tier open costs propagate through the same
+    feedback over successive rounds). The best chain by TRUE cost wins."""
+    import shutil
+    passes = artifacts["passes"]
+    open_adjust = [0.0] * len(passes)
+    best, best_tag, history = None, "", []
+    for r in range(1, max(1, rounds) + 1):
+        tag = f".r{r}"
+        print(f"[chain round {r}/{rounds}]", flush=True)
+        s = run_chain_once(out_dir, artifacts, arcedge_bin, open_adjust, tag)
+        history.append(dict(round=r, total_cost=s["total_cost"],
+                            open_adjust=list(open_adjust)))
+        print(f"  round {r} true total: {s['total_cost']:.0f}", flush=True)
+        if best is None or s["total_cost"] < best["total_cost"]:
+            best, best_tag = s, tag
+        # Feedback: marginal upper-tier cable per facility of this tier.
+        for i in range(len(passes) - 1):
+            up = s["tiers"][i + 1]
+            n = max(1, s["tiers"][i]["hubs"])
+            open_adjust[i] = passes[i + 1]["cable_cost"] * up["cable_m"] / n
+    # Canonicalize the winning round's artifacts.
+    for i in range(1, len(passes) + 1):
+        for ext in (".result", ".solution", ".pois"):
+            src = out_dir / f"tier{i}{best_tag}{ext}"
+            if src.exists():
+                shutil.copy(src, out_dir / f"tier{i}{ext}")
+    best["rounds"] = history
+    json.dump(best, open(out_dir / "tiers_summary.json", "w"), indent=2)
     breakdown = " + ".join(
-        "{:.0f} {}".format(t["cost"], t["tier"]) for t in summary["tiers"])
-    print("\nCHAIN TOTAL COST {:.0f}  ({})".format(summary["total_cost"], breakdown))
-    return summary
+        "{:.0f} {}".format(t["cost"], t["tier"]) for t in best["tiers"])
+    print("\nCHAIN TOTAL COST {:.0f}  ({})  [best of {} round(s)]".format(
+        best["total_cost"], breakdown, len(history)))
+    return best
 
 
 # ---------------------------------------------------------------- main ----
@@ -541,6 +580,11 @@ def main():
     ap.add_argument("--solve", action="store_true",
                     help="after compiling, run the solver (multi-tier designs "
                          "run the whole facility chain)")
+    ap.add_argument("--rounds", type=int, default=1,
+                    help="joint-feedback rounds for facility chains: each "
+                         "round re-places lower tiers with their open costs "
+                         "inflated by the measured marginal upper-tier cable "
+                         "(best chain by true cost wins)")
     ap.add_argument("--arcedge", default="./build/arcedge",
                     help="path to the arcedge binary (with --solve)")
     args = ap.parse_args()
@@ -548,7 +592,8 @@ def main():
         artifacts = compile_model(Path(args.config), Path(args.out))
         if args.solve:
             if "passes" in artifacts:
-                solve_design_chain(Path(args.out), artifacts, args.arcedge)
+                solve_design_chain(Path(args.out), artifacts, args.arcedge,
+                                   rounds=args.rounds)
             else:
                 import subprocess
                 cmd = artifacts["solve"].split()

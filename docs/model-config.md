@@ -12,9 +12,19 @@ demand-weighted terminals. Facility *serving* capacity is native in the C++
 solver (`--hub-cap`, over-capacity hubs shed their heaviest child subtree
 during repair), demands are weighted, and upper-tier demand nodes are
 transit-capable (`--demand-transit`). Checked-in examples under `examples/`
-are exercised by E2E step 10. Remaining phases: R3-7b (OD matrices, node
-capacities), R3-7c (multiplier-clamp soft caps, overage exports), and the
-exact (non-chained) multi-tier formulation.
+are exercised by E2E step 10.
+
+**Joint-aware chains** (`--rounds N`): the exact joint multi-tier MIP is
+intractable at city scale (a single tier already stalls HiGHS at 400
+addresses), so joint awareness is delivered as measured-cost feedback:
+after each chain round, tier i's open cost is inflated by the marginal
+upper-tier cable per facility actually paid (upper open costs propagate
+through successive rounds), the chain re-solves, and the best round by
+true cost wins — provably never worse than the greedy chain. Full-SF:
+-1.6% total cost in 3 rounds (terminals 11,050 → 10,139, feeder
+619 → 571 km). Remaining phases: R3-7b (OD matrices, node capacities),
+R3-7c (multiplier-clamp soft caps, overage exports); an exact joint
+formulation stays roadmap-only for small instances.
 
 Schema note learned in implementation: the capacity-rule selector key is
 **`where:`** (the spec originally used `on:`, which YAML 1.1 parses as the
