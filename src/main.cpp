@@ -1,6 +1,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <iomanip>
 #include <string>
 #include <thread>
 
@@ -93,6 +94,7 @@ int run_solve(int argc, char** argv) {
       res.best_lb, res.best_ub, res.gap * 100.0, res.iters, res.millis);
   if (!result_path.empty()) {
     std::ofstream out(result_path);
+    out << std::setprecision(15);  // bounds must not round across the LP optimum
     out << "lb " << res.best_lb << "\nub " << res.best_ub << "\ngap " << res.gap
         << "\niters " << res.iters << "\nms " << res.millis << "\n";
   }
@@ -137,6 +139,7 @@ int run_design(int argc, char** argv) {
               res.hubs, res.hub_cost, res.cable_m, res.cable_cost, res.total_cost);
   if (!result_path.empty()) {
     std::ofstream out(result_path);
+    out << std::setprecision(15);
     out << "hubs " << res.hubs << "\ncable_m " << res.cable_m << "\nhub_cost "
         << res.hub_cost << "\ncable_cost " << res.cable_cost << "\ntotal_cost "
         << res.total_cost << "\n";

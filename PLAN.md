@@ -257,3 +257,22 @@ Known S2-M1 caveats to close on GPU hardware: FP32 LB needs a final FP64
 re-evaluation of L(λ) for a certified bound; path/load extraction currently
 copies the packed array back per iteration (device-side extraction is the
 follow-up optimization).
+
+## Platform validation
+
+| Platform | Status |
+|----------|--------|
+| Linux x86-64 (GCC 13, 4-core container) | canonical benchmark platform; all numbers in this file |
+| Google Colab (T4 GPU, CUDA) | full E2E + CUDA backend pass |
+| macOS Apple Silicon (M3, AppleClang 17) | full E2E passes unmodified; large-instance iterations ~1.3–2.7× faster than the 4-core Linux container |
+
+**Known limitation — instances are not bit-identical across C++ standard
+libraries.** The generator drives `std::mt19937` (portable) through
+`std::uniform_int_distribution` / `uniform_real_distribution`, whose output
+sequences are implementation-defined: libstdc++ (Linux) and libc++ (macOS)
+produce *different* instances from the same seed, so objective values differ
+across platforms even though every platform validates correctly against its
+own HiGHS reference. Benchmark comparisons are therefore within-platform
+only, with Linux as the canonical baseline. Fix scheduled with the S2-M5
+benchmark suite: replace the std distributions with hand-rolled portable
+ones (single-sweep renumbering of all documented baselines).

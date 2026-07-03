@@ -10,8 +10,9 @@ cd "$(dirname "$0")/.."
 export PYTHONUNBUFFERED=1  # progress must stream when piped (Colab, CI)
 
 echo "=== [1/8] build ==="
+NCORES=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
 cmake -B build -DCMAKE_BUILD_TYPE=Release >/dev/null
-cmake --build build -j"$(nproc)" >/dev/null
+cmake --build build -j"$NCORES" >/dev/null
 
 echo "=== [2/8] unit tests ==="
 ctest --test-dir build --output-on-failure
