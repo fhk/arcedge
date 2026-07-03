@@ -381,6 +381,43 @@ Learned during implementation: naive all-at-once relief exploded hub counts
 prune pass recovers the parsimony that one-hub-per-round bought with its
 hundreds of rebuilds.
 
+## Design-chain performance: next round (R3-2b) and the GPU verdict
+
+Amdahl analysis from the two benchmark machines (4-core: ~53 s/round;
+48-vCPU: ~26 s/round ⇒ only 2× from 12× cores ⇒ serial fraction ≈ 45%):
+the parallel phases (k-sweep, per-cluster SPH) are done; the critical path
+is now the *serial* repair/prune chains inside each evaluation. CPU fixes,
+in expected-value order:
+
+1. **Subtree load aggregation** — replace per-POI path walks
+   (Σ path-lengths ≈ 5.5M steps/round at 55k POIs) with reverse
+   Dijkstra-order accumulation, O(n+m) ≈ 230k. The walk currently costs as
+   much as the Dijkstra itself.
+2. **Incremental grow_forest during repair** — relief hubs only lower
+   distances locally; seed the new hubs and relax outward instead of
+   rebuilding the whole forest each round (10–50× less Dijkstra work).
+3. **Parallel prune probing** — the prune loop is ~30 *sequential* cheap
+   evaluations; batch-test candidate drops concurrently.
+4. Dial's/bucket priority queue for the meter-weighted Dijkstras (2–3×
+   constant factor).
+Compound estimate: another 3–5× ⇒ city-scale round ≈ 5–10 s on a big box.
+
+**GPU for the design chain: not worth it now.** The kernel is multi-source
+Dijkstra on a *general* (cyclic) 107k-node street graph — the MCF backend's
+level-sweep trick needs a layered DAG and does not apply; general-graph GPU
+SSSP (delta-stepping) at this size is frontier-starved and
+launch-overhead-bound, the repair loop is a serial chain of dependent
+solves, and the workload is already interactive (26 s/city). Weeks of CUDA
+for maybe 2–5× on the wrong bottleneck. Revisit only if graphs grow 10×+
+(multi-city) or evaluations must batch in the thousands.
+
+**Where the GPU IS worth it (unchanged, still valid — R3-3):** the MCF
+Lagrangian backend. Device-resident λ + subgradient update (removes the
+7 MB/iter upload), CUDA Graphs over the ~35 per-level launches, pinned
+buffers: 46 → ~15 ms/iter at K=2000, opening K=10k+; plus GPU wave-primal
+(R3-1d) when MCF batches grow. These matter for the flow-model side
+(time-expanded MCF, future LNS/Steiner), not for the facility chain.
+
 ## Joint-chain benchmark (user-reported, Colab GPU-class runtime, 2026-07-03)
 
 Machine: AMD EPYC 9B45, 48 vCPU, 176 GB RAM (RTX PRO 6000 Blackwell present
