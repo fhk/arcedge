@@ -201,7 +201,7 @@ models: soft with a stiff penalty, hard caps only where physics demands.
 | Soft/elastic demand (`unserved_penalty`) | yes | none (virtual sink arc per commodity) |
 | Declarative time expansion, release/deadline windows | yes | none (windows = restricted source/sink layers) |
 | Existing infrastructure (brownfield: `fixed_cost: 0` on built edges) | yes | none |
-| Duct/right-of-way sharing across layers (one fixed charge, many users) | v1 approximation: shared edge fixed charge | exact multi-layer sharing: medium |
+| Duct/right-of-way sharing across tiers (`cable.reuse_factor`) | **implemented** for facility chains: later tiers pay `reuse_factor` × cost on edges already carrying cable and are routed toward them (full-SF: OLT trunk 94% on existing duct, −7.3% total) | exact simultaneous multi-layer sharing: medium |
 | Unsplittable commodities | no | large (branching / rounding; roadmap) |
 | Multi-period investment, stochastic scenarios | no | large (roadmap; schema reserves `periods:`/`scenarios:` keys) |
 | Protection / diverse paths | no | medium-large (roadmap) |

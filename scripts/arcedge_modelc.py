@@ -353,7 +353,14 @@ def emit_design(out_dir, model, nodes, edges, edge_caps, poi_nodes,
     if not tiers:
         fail("design mode needs at least one facility tier")
     default_edge_cap = resolve_design_edge_cap(edge_caps)
-    cable_cost = float((model.get("cable") or {}).get("fixed_cost_per_m", 10.0))
+    cable_spec = model.get("cable") or {}
+    cable_cost = float(cable_spec.get("fixed_cost_per_m", 10.0))
+    # Duct/trench sharing: edges already carrying cable from an earlier tier
+    # cost only this fraction for later tiers. Discounted lengths also steer
+    # upper-tier routing onto existing corridors.
+    reuse_factor = float(cable_spec.get("reuse_factor", 1.0))
+    if not 0.0 < reuse_factor <= 1.0:
+        fail(f"cable.reuse_factor must be in (0, 1], got {reuse_factor}")
 
     graph = out_dir / "access.graph"
     pois = out_dir / "tier0.pois"
@@ -386,7 +393,7 @@ def emit_design(out_dir, model, nodes, edges, edge_caps, poi_nodes,
         cmd += "   # tier 1 of {}; use --solve to run the whole chain".format(
             len(passes))
     return {"graph": str(graph), "pois": str(pois), "passes": passes,
-            "design": cmd}
+            "reuse_factor": reuse_factor, "design": cmd}
 
 
 # ----------------------------------------------------------- tier chain ---
@@ -395,17 +402,46 @@ def run_chain_once(out_dir, artifacts, arcedge_bin, open_adjust, tag):
     """One bottom-up pass over the facility tiers: each tier's opened hubs
     become the next tier's demand points (demand = units served).
     `open_adjust[i]` inflates tier i's open cost for PLACEMENT only (the
-    joint feedback); reported costs are always the true (base) costs."""
+    joint feedback); reported costs are always the true (base) costs.
+
+    Duct sharing (reuse_factor < 1): before each upper tier solves, a graph
+    variant is written where edges already carrying cable from earlier tiers
+    have their lengths scaled by reuse_factor -- the solver's routing metric
+    and cable objective are the same lengths, so upper tiers are both
+    CHARGED less on and ATTRACTED to existing corridors."""
     import subprocess
     graph = artifacts["graph"]
     pois_path = artifacts["pois"]
     passes = artifacts["passes"]
+    reuse = artifacts.get("reuse_factor", 1.0)
+    orig_len = {}
+    if reuse < 1.0:
+        with open(graph) as f:
+            for line in f:
+                p = line.split()
+                if p and p[0] == "e":
+                    u, v = int(p[1]), int(p[2])
+                    orig_len.setdefault((min(u, v), max(u, v)), float(p[3]))
+    used_edges = set()  # street edges carrying cable from earlier tiers
     tiers = []
     for i, ps in enumerate(passes):
         result = out_dir / f"tier{i + 1}{tag}.result"
         solution = out_dir / f"tier{i + 1}{tag}.solution"
+        tier_graph = graph
+        if used_edges and reuse < 1.0:
+            tier_graph = out_dir / f"access{tag}.t{i + 1}.graph"
+            with open(tier_graph, "w") as f:
+                f.write(f"c tier-{i + 1} view: reused edges scaled x{reuse:g}\n")
+                nodes = sum(1 for l in open(graph) if l.startswith("v "))
+                f.write(f"g {nodes} {2 * len(orig_len)}\n")
+                for line in open(graph):
+                    if line.startswith("v "):
+                        f.write(line)
+                for (u, v), ln in sorted(orig_len.items()):
+                    eff = ln * reuse if (u, v) in used_edges else ln
+                    f.write(f"e {u} {v} {eff:.4f}\ne {v} {u} {eff:.4f}\n")
         eff_open = ps["hub_cost"] + open_adjust[i]
-        cmd = [arcedge_bin, "design", "--graph", str(graph),
+        cmd = [arcedge_bin, "design", "--graph", str(tier_graph),
                "--pois", str(pois_path),
                "--cap", f"{ps['edge_cap']:g}", "--hub-cap", f"{ps['hub_cap']:g}",
                "--hub-cost", f"{eff_open:g}",
@@ -419,8 +455,33 @@ def run_chain_once(out_dir, artifacts, arcedge_bin, open_adjust, tag):
             fail(f"tier {ps['tier']} design failed")
         res = {k: float(v) for k, v in
                (l.split() for l in open(result) if not l.startswith("hub_nodes"))}
-        true_cost = res["hubs"] * ps["hub_cost"] + \
-            res["cable_m"] * ps["cable_cost"]
+        # Physical accounting against ORIGINAL lengths: new vs reused meters.
+        new_m = reused_m = 0.0
+        tier_edges = set()
+        for line in open(solution):
+            parts = line.split()
+            if parts and parts[0] == "e":
+                key = (min(int(parts[1]), int(parts[2])),
+                       max(int(parts[1]), int(parts[2])))
+                tier_edges.add(key)
+                if reuse < 1.0:
+                    ln = orig_len.get(key)
+                    if ln is None:
+                        continue  # drop edges appear only in the access graph
+                    if key in used_edges:
+                        reused_m += ln
+                    else:
+                        new_m += ln
+        if reuse < 1.0:
+            # Drops and splits missing from orig_len: charge at solver value.
+            residual_m = max(0.0, res["cable_m"] -
+                             (new_m + reuse * reused_m))
+            cable_charged = new_m + reuse * reused_m + residual_m
+            cable_physical = new_m + reused_m + residual_m
+            used_edges |= tier_edges
+        else:
+            cable_charged = cable_physical = res["cable_m"]
+        true_cost = res["hubs"] * ps["hub_cost"] + cable_charged * ps["cable_cost"]
         dem_of = {}
         for line in open(pois_path):
             parts = line.split()
@@ -433,13 +494,16 @@ def run_chain_once(out_dir, artifacts, arcedge_bin, open_adjust, tag):
                 served[int(parts[2])] = served.get(int(parts[2]), 0.0) + \
                     dem_of.get(int(parts[1]), 1.0)
         tiers.append(dict(tier=ps["tier"], hubs=int(res["hubs"]),
-                          cable_m=res["cable_m"], cost=true_cost,
-                          ms=res.get("ms", 0.0),
+                          cable_m=cable_physical, reused_m=reused_m,
+                          new_m=cable_physical - reused_m,
+                          cost=true_cost, ms=res.get("ms", 0.0),
                           open_adjust=open_adjust[i],
                           result=str(result), solution=str(solution),
                           pois=str(pois_path)))
+        reused_note = (f", {reused_m:.0f} m reused x{reuse:g}"
+                       if reused_m else "")
         print(f"  [{ps['tier']}] {int(res['hubs'])} facilities, "
-              f"{res['cable_m']:.0f} m, true cost {true_cost:.0f}"
+              f"{cable_physical:.0f} m{reused_note}, true cost {true_cost:.0f}"
               + (f" (placement open +{open_adjust[i]:.0f})" if open_adjust[i] else ""),
               flush=True)
         if i + 1 < len(passes):
@@ -475,11 +539,13 @@ def solve_design_chain(out_dir, artifacts, arcedge_bin, rounds=1):
               f"({history[-1]['wall_s']:.0f} s)", flush=True)
         if best is None or s["total_cost"] < best["total_cost"]:
             best, best_tag = s, tag
-        # Feedback: marginal upper-tier cable per facility of this tier.
+        # Feedback: marginal upper-tier cable COST per facility of this tier
+        # (cost, not meters, so duct-sharing discounts flow through).
         for i in range(len(passes) - 1):
             up = s["tiers"][i + 1]
             n = max(1, s["tiers"][i]["hubs"])
-            open_adjust[i] = passes[i + 1]["cable_cost"] * up["cable_m"] / n
+            up_cable_cost = up["cost"] - up["hubs"] * passes[i + 1]["hub_cost"]
+            open_adjust[i] = max(0.0, up_cable_cost) / n
     # Canonicalize the winning round's artifacts.
     for i in range(1, len(passes) + 1):
         for ext in (".result", ".solution", ".pois"):

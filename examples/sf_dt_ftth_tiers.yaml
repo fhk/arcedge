@@ -37,6 +37,9 @@ facilities:
 
 cable:
   fixed_cost_per_m: 10
+  # duct sharing: a street section already carrying cable from an earlier
+  # tier costs only this fraction for later tiers (and attracts their routes)
+  reuse_factor: 0.25
 
 commodities:
   - name: service

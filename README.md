@@ -158,14 +158,23 @@ by the *measured* marginal upper-tier cable per facility from the previous
 round, and the best chain by true cost wins (never worse than greedy —
 asserted in E2E).
 
-Full-city SF (54,921 Overture address points, `--rounds 3`):
+**Duct sharing** (`cable.reuse_factor`): street sections already carrying
+cable from an earlier tier cost only that fraction for later tiers — and
+since the routing metric and the cable objective are the same lengths,
+upper tiers are actively *attracted* onto existing corridors.
 
-| tier | facilities | cable | cost |
-|------|-----------:|------:|-----:|
-| terminal (≤12) | 10,139 | 1,857 km | 23,635,692 |
-| FDH (≤512) | 199 | 571 km | 9,687,436 |
-| OLT (≤4000) | 24 | 112 km | 3,516,854 |
-| **chain total** | | 2,540 km | **36,839,982** (~671/address; greedy chain was 37,432,879 — joint feedback saves 1.6%) |
+Full-city SF (54,921 Overture address points, `--rounds 3`,
+`reuse_factor: 0.25`):
+
+| tier | facilities | cable (physical) | reused on lower-tier duct | cost |
+|------|-----------:|------:|------:|-----:|
+| terminal (≤12) | 10,511 | 1,845 km | — | 23,708,699 |
+| FDH (≤512) | 192 | 612 km | 328 km (54%) | 7,494,333 |
+| OLT (≤4000) | 26 | 119 km | 111 km (94%) | 2,951,060 |
+| **chain total** | | 2,576 km | | **34,154,091** (~622/address) |
+
+Reference points: no sharing + joint rounds = 36,839,982; greedy chain
+without sharing = 37,432,879. Duct sharing saves a further 7.3%.
 
 Wall-clock for all three rounds: **~45 s on a 4-core box** after the R3-2b
 serial-path optimizations (subtree load aggregation + incremental forest
