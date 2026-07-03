@@ -381,6 +381,24 @@ Learned during implementation: naive all-at-once relief exploded hub counts
 prune pass recovers the parsimony that one-hub-per-round bought with its
 hundreds of rebuilds.
 
+## Joint-chain benchmark (user-reported, Colab GPU-class runtime, 2026-07-03)
+
+Machine: AMD EPYC 9B45, 48 vCPU, 176 GB RAM (RTX PRO 6000 Blackwell present
+but idle — the design chain is CPU-parallel). Full-city SF FTTH
+(54,921 addresses, terminal ≤12 → FDH ≤512 → OLT ≤4000), 3 joint rounds:
+
+| round | true total | vs greedy | wall s | terminals | FDH | OLT |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 37,432,879 | +0.00% | 27 | 11,050 | 206 | 24 |
+| 2 | 37,006,883 | −1.14% | 26 | 10,433 | 192 | 24 |
+| 3 | 36,839,982 | −1.58% | 25 | 10,139 | 199 | 24 |
+
+**81 s total wall-clock** vs ~8–10 min/round on the 4-core reference
+container (~20× on 12× cores — the EPYC's per-core speed and cache make it
+superlinear), with **identical solutions on both machines** (Linux/libstdc++
+determinism plus fixed per-k seeding). City-scale three-tier design is now
+an interactive-latency operation on a big CPU box.
+
 ## Platform validation
 
 | Platform | Status |
