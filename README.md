@@ -170,7 +170,12 @@ Full-city SF (54,921 Overture address points, `--rounds 3`):
 Run it yourself with `notebooks/arcedge_ftth_sf_colab.ipynb` (Colab, CPU
 runtime): upload the Overture places parquet, edit the cost/capacity
 parameters, and it compiles, solves the chain, tabulates metrics, exports
-per-tier GeoParquet, and draws the network map.
+per-tier GeoParquet, and draws the network map. For performance
+benchmarking of the joint rounds (per-round cost/wall-clock, per-tier
+solver times, machine specs, paste-ready report), use
+`notebooks/arcedge_joint_bench_colab.ipynb` — note the design chain is
+CPU-parallel; a Colab GPU runtime helps via its larger vCPU allocation,
+not the GPU itself.
 
 ## Solution output: GeoParquet
 

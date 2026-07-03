@@ -457,16 +457,22 @@ def solve_design_chain(out_dir, artifacts, arcedge_bin, rounds=1):
     previous round (upper-tier open costs propagate through the same
     feedback over successive rounds). The best chain by TRUE cost wins."""
     import shutil
+    import time
     passes = artifacts["passes"]
     open_adjust = [0.0] * len(passes)
     best, best_tag, history = None, "", []
     for r in range(1, max(1, rounds) + 1):
         tag = f".r{r}"
         print(f"[chain round {r}/{rounds}]", flush=True)
+        t0 = time.monotonic()
         s = run_chain_once(out_dir, artifacts, arcedge_bin, open_adjust, tag)
-        history.append(dict(round=r, total_cost=s["total_cost"],
-                            open_adjust=list(open_adjust)))
-        print(f"  round {r} true total: {s['total_cost']:.0f}", flush=True)
+        history.append(dict(
+            round=r, total_cost=s["total_cost"], open_adjust=list(open_adjust),
+            wall_s=time.monotonic() - t0,
+            tiers=[{k: t[k] for k in ("tier", "hubs", "cable_m", "cost", "ms")}
+                   for t in s["tiers"]]))
+        print(f"  round {r} true total: {s['total_cost']:.0f} "
+              f"({history[-1]['wall_s']:.0f} s)", flush=True)
         if best is None or s["total_cost"] < best["total_cost"]:
             best, best_tag = s, tag
         # Feedback: marginal upper-tier cable per facility of this tier.
