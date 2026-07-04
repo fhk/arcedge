@@ -437,6 +437,28 @@ buffers: 46 → ~15 ms/iter at K=2000, opening K=10k+; plus GPU wave-primal
   34,154,091 (sharing) → **33,737,619** (slide + diversified rounds), −9.9%
   overall at ~16 s/round on 4 cores.
 
+## R3-9: solution-quality program (design chains)
+
+Where the remaining cost hides, ranked by expected value per effort. Context
+for the estimates: full-SF total 33.74M splits ≈ 70% tier-1 (drops +
+distribution), 22% FDH feeder, 8% OLT trunk; cable is 85% of total cost, so
+cable-routing quality is worth ~10× facility-count quality.
+
+| # | Approach | Idea | Expected gain | Effort |
+|---|----------|------|---------------|--------|
+| Q1 | **Boundary reassignment (tree-marginal)** | Assignment is nearest-HUB, but customers are served by TREES: a boundary POI whose neighbor cluster's tree passes close by costs ~0 marginal there vs a fresh branch in its own cluster. Local search: for each POI near a cluster boundary, compare marginal cable (distance to nearest node of each adjacent cluster tree), move if cheaper and caps allow, rebuild affected trees. | 2–5% of cable | medium |
+| Q2 | **Bidirectional duct sharing (down-sweep)** | Sharing currently flows one way (upper tiers reuse lower duct). Add down-sweep rounds: re-solve tier 1 with upper-tier corridors discounted, alternate up/down until converged, with a settlement pass so each shared edge is charged full exactly once + α per extra tier. Distribution is 70% of cost — letting IT reuse feeder trench is the biggest untouched sharing direction. | 1–4% | medium (reuses existing machinery) |
+| Q3 | **Per-facility spatial feedback** | Joint feedback currently inflates open costs by the AVERAGE upper-tier marginal; replace with each candidate site's own distance-to-upper-tree from the previous round. Facilities far from the feeder then justify themselves properly. | 0.5–2% | small |
+| Q4 | **GRASP-style diversified rounds** | Seed rounds already sample basins; add cost-perturbation restarts (open cost ±10%, SPH insertion-order shuffle) — rounds are ~16 s, so this is nearly free compute. | 0.5–1.5% | trivial |
+| Q5 | **LNS with exact sub-MIPs (S2-M2, planned)** | Clusters are edge-disjoint: warm-start HiGHS on the worst-cost clusters (and merged neighbor pairs) — exact answers locally, hub merges the heuristic can't see. Also yields local optimality certificates. | 1–3% | medium |
+| Q6 | **Drop re-coupling** | Drops go to the geometric nearest edge; allow the k=3 nearest edges and pick the one whose distribution tree is marginally cheapest ("extend the drop to meet existing cable"). | 0.5–2% | medium |
+| Q7 | **Key-path Steiner local search** | SCIP-Jack-style tree improvement (replace tree paths between branch nodes with cheaper off-tree paths) on FDH/OLT trees, where trees are large and SPH's greedy order costs the most. | 1–3% of feeder/trunk | medium |
+| Q8 | **Gap measurement** | We optimize blind above validation scale. Exact MIP anchors on medium crops (2–5k addresses, hours offline) + the S2-M4 dual-ascent bound to know the true remaining gap instead of guessing. | knowledge, not cost | medium |
+
+Recommended order: Q3+Q4 first (days, no structure change), then Q1
+(the single biggest lever), Q2, then Q5 as the exact tail. Q8 runs offline
+alongside to tell us when to stop.
+
 ## Joint-chain benchmark (user-reported, Colab GPU-class runtime, 2026-07-03)
 
 Machine: AMD EPYC 9B45, 48 vCPU, 176 GB RAM (RTX PRO 6000 Blackwell present
