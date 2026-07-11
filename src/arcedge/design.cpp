@@ -1,5 +1,7 @@
 #include "design.hpp"
 
+#include "dual_ascent.hpp"
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -30,7 +32,8 @@ struct Net {
   std::vector<int32_t> adj_nbr;
   std::vector<int32_t> adj_edge;
   std::vector<char> is_poi;
-  std::vector<double> x, y;  // projected coords (m)
+  std::vector<char> midblock;  // per node; empty = no mid-block flags
+  std::vector<double> x, y;    // projected coords (m)
 };
 
 Net build_net(const StreetGraph& g, const std::vector<int32_t>& pois,
@@ -68,6 +71,7 @@ Net build_net(const StreetGraph& g, const std::vector<int32_t>& pois,
   net.is_poi.assign(static_cast<size_t>(net.n), 0);
   if (mark_leaves)
     for (int32_t p : pois) net.is_poi[static_cast<size_t>(p)] = 1;
+  net.midblock = g.midblock;
   // Equirectangular projection, consistent with scripts/connect_pois.py.
   const double kx = 111320.0 * std::cos(37.77 * M_PI / 180.0), ky = 110540.0;
   net.x.resize(static_cast<size_t>(net.n));
@@ -165,6 +169,9 @@ void grow_forest_add(const Net& net, const std::vector<int32_t>& new_hubs,
 struct Eval {
   double cost = kInfD;
   double cable_m = 0.0;
+  double cable_lb = 0.0;  // dual-ascent bound, set by consolidate evals
+  double splice_cost = 0.0;
+  int64_t splices = 0, splices_mid = 0;
   std::vector<int32_t> hubs;
   std::vector<DesignUsedEdge> used;  // edges with load > 0
   std::vector<int32_t> poi_hub;      // serving hub per POI index
@@ -178,6 +185,39 @@ std::vector<DesignUsedEdge> used_from_loads(const Net& net,
     if (load[e] > 0.0)
       used.push_back({net.eu[e], net.ev[e], load[e]});
   return used;
+}
+
+// Exact splice charging over a used-edge set: a non-hub node of tree degree
+// d >= 3 carries d - 2 branch splices (hubs are cabinets and splice for
+// free); branches at mid-block nodes pay the surcharge on top.
+struct SpliceCharge {
+  double cost = 0.0;
+  int64_t branches = 0, mid = 0;
+};
+
+SpliceCharge splice_charge(const Net& net, const DesignParams& p,
+                           const std::vector<DesignUsedEdge>& used,
+                           const std::vector<int32_t>& hubs) {
+  SpliceCharge s;
+  if (p.splice_cost <= 0.0 && p.splice_midblock_surcharge <= 0.0) return s;
+  std::vector<int32_t> deg(static_cast<size_t>(net.n), 0);
+  for (const DesignUsedEdge& e : used) {
+    deg[static_cast<size_t>(e.u)]++;
+    deg[static_cast<size_t>(e.v)]++;
+  }
+  std::vector<char> is_hub(static_cast<size_t>(net.n), 0);
+  for (int32_t h : hubs) is_hub[static_cast<size_t>(h)] = 1;
+  for (int32_t v = 0; v < net.n; ++v) {
+    if (deg[static_cast<size_t>(v)] < 3 || is_hub[static_cast<size_t>(v)])
+      continue;
+    const int64_t b = deg[static_cast<size_t>(v)] - 2;
+    s.branches += b;
+    if (!net.midblock.empty() && net.midblock[static_cast<size_t>(v)])
+      s.mid += b;
+  }
+  s.cost = p.splice_cost * static_cast<double>(s.branches) +
+           p.splice_midblock_surcharge * static_cast<double>(s.mid);
+  return s;
 }
 
 // Routes all POIs on the forest metric until capacity holds, opening relief
@@ -325,10 +365,26 @@ double sph_cluster(const Net& net, const Forest& f, const DesignParams& p,
                    int32_t hub,
                    const std::vector<std::pair<int32_t, double>>& cluster_pois,
                    std::vector<double>& load, std::vector<char>& tree_edge,
-                   std::vector<double>& dist, std::vector<int32_t>& pe,
-                   std::vector<int32_t>& pn, std::vector<uint32_t>& stamp,
-                   uint32_t& version) {
+                   std::vector<int32_t>& tree_deg, std::vector<double>& dist,
+                   std::vector<int32_t>& pe, std::vector<int32_t>& pn,
+                   std::vector<uint32_t>& stamp, uint32_t& version) {
   double cable = 0.0;
+  // Splice steering: attaching a NEW edge to a node that already carries
+  // >= 2 tree edges creates a branch there, so that step is priced at the
+  // splice cost in cable-equivalent meters (approximate -- the exact charge
+  // lands in evaluate()). Zero when splices are disabled: weights are then
+  // bit-identical to the pre-splice heuristic.
+  const bool steer = (p.splice_cost > 0.0 ||
+                      p.splice_midblock_surcharge > 0.0) &&
+                     p.cable_cost_per_m > 0.0;
+  auto branch_eq_m = [&](int32_t v) {
+    if (!steer || v == hub || tree_deg[static_cast<size_t>(v)] < 2)
+      return 0.0;
+    double c = p.splice_cost;
+    if (!net.midblock.empty() && net.midblock[static_cast<size_t>(v)])
+      c += p.splice_midblock_surcharge;
+    return c / p.cable_cost_per_m;
+  };
   using Item = std::pair<double, int32_t>;
   for (const auto& [poi, q] : cluster_pois) {
     ++version;
@@ -358,7 +414,8 @@ double sph_cluster(const Net& net, const Forest& f, const DesignParams& p,
             continue;  // full for this demand
           w = 0.0;
         } else {
-          w = net.elen[static_cast<size_t>(e)];
+          w = net.elen[static_cast<size_t>(e)] + branch_eq_m(u) +
+              branch_eq_m(v);
         }
         const double nd = d + w;
         if (stamp[static_cast<size_t>(v)] != version ||
@@ -378,20 +435,112 @@ double sph_cluster(const Net& net, const Forest& f, const DesignParams& p,
       if (!tree_edge[static_cast<size_t>(e)]) {
         tree_edge[static_cast<size_t>(e)] = 1;
         cable += net.elen[static_cast<size_t>(e)];
+        tree_deg[static_cast<size_t>(net.eu[e])]++;
+        tree_deg[static_cast<size_t>(net.ev[e])]++;
       }
     }
   }
   return cable;
 }
 
+// Per-cluster Wong dual ascent: a lower bound on the cluster's cable
+// (restricted to the cluster's forest region, which every realized cluster
+// tree stays inside), and -- when edge capacities are off -- a candidate
+// replacement tree taken when it beats the SPH tree. Returns the cluster's
+// final cable meters and adds the cluster LB to `lb_out`.
+double da_cluster(const Net& net, const Forest& f, const DesignParams& p,
+                  int32_t hub,
+                  const std::vector<std::pair<int32_t, double>>& cluster_pois,
+                  std::vector<double>& load, std::vector<char>& tree_edge,
+                  double sph_cable, std::vector<int32_t>& local_id,
+                  double& lb_out) {
+  // Region = forest cluster of `hub`, gathered by BFS that (like every other
+  // search here) never transits a customer-premises leaf.
+  std::vector<int32_t> region;
+  region.push_back(hub);
+  local_id[static_cast<size_t>(hub)] = 0;
+  for (size_t qh = 0; qh < region.size(); ++qh) {
+    const int32_t u = region[qh];
+    if (u != hub && net.is_poi[static_cast<size_t>(u)]) continue;
+    for (int32_t i = net.adj_off[static_cast<size_t>(u)];
+         i < net.adj_off[static_cast<size_t>(u) + 1]; ++i) {
+      const int32_t v = net.adj_nbr[static_cast<size_t>(i)];
+      if (local_id[static_cast<size_t>(v)] >= 0) continue;
+      if (v != hub && f.hub_of[static_cast<size_t>(v)] != hub) continue;
+      local_id[static_cast<size_t>(v)] = static_cast<int32_t>(region.size());
+      region.push_back(v);
+    }
+  }
+  // Local directed arcs (both directions of each region edge, except out of
+  // customer leaves) with their global edge ids.
+  std::vector<int32_t> tail, head, garc;
+  std::vector<double> acost;
+  for (const int32_t u : region) {
+    if (u != hub && net.is_poi[static_cast<size_t>(u)]) continue;
+    for (int32_t i = net.adj_off[static_cast<size_t>(u)];
+         i < net.adj_off[static_cast<size_t>(u) + 1]; ++i) {
+      const int32_t v = net.adj_nbr[static_cast<size_t>(i)];
+      if (local_id[static_cast<size_t>(v)] < 0) continue;
+      const int32_t e = net.adj_edge[static_cast<size_t>(i)];
+      tail.push_back(local_id[static_cast<size_t>(u)]);
+      head.push_back(local_id[static_cast<size_t>(v)]);
+      garc.push_back(e);
+      acost.push_back(net.elen[static_cast<size_t>(e)]);
+    }
+  }
+  std::vector<int32_t> terms;
+  terms.reserve(cluster_pois.size());
+  for (const auto& [poi, q] : cluster_pois)
+    terms.push_back(local_id[static_cast<size_t>(poi)]);
+
+  const DualAscentResult da = steiner_dual_ascent(
+      static_cast<int32_t>(region.size()), tail, head, acost, 0, terms);
+  if (std::isfinite(da.lower_bound)) lb_out += da.lower_bound;
+
+  double out_cable = sph_cable;
+  if (da.feasible && p.edge_cap <= 0.0) {
+    double da_cable = 0.0;
+    for (int32_t a : da.tree_arcs)
+      da_cable += net.elen[static_cast<size_t>(garc[static_cast<size_t>(a)])];
+    if (da_cable + 1e-9 < sph_cable) {
+      // Swap the cluster's SPH tree for the dual-ascent tree. Regions are
+      // node-disjoint, so clearing edges internal to this region touches no
+      // other cluster's state.
+      for (int32_t e : garc)
+        if (tree_edge[static_cast<size_t>(e)]) {
+          tree_edge[static_cast<size_t>(e)] = 0;
+          load[static_cast<size_t>(e)] = 0.0;
+        }
+      std::vector<int32_t> parent_arc(region.size(), -1);
+      for (int32_t a : da.tree_arcs) {
+        tree_edge[static_cast<size_t>(garc[static_cast<size_t>(a)])] = 1;
+        parent_arc[static_cast<size_t>(head[static_cast<size_t>(a)])] = a;
+      }
+      for (const auto& [poi, q] : cluster_pois)
+        for (int32_t v = local_id[static_cast<size_t>(poi)]; v != 0;) {
+          const int32_t a = parent_arc[static_cast<size_t>(v)];
+          load[static_cast<size_t>(garc[static_cast<size_t>(a)])] += q;
+          v = tail[static_cast<size_t>(a)];
+        }
+      out_cable = da_cable;
+    }
+  }
+  for (const int32_t v : region) local_id[static_cast<size_t>(v)] = -1;
+  return out_cable;
+}
+
 double sph_consolidate(const Net& net, const std::vector<int32_t>& pois,
                        const std::vector<double>& dem,
                        const std::vector<int32_t>& hubs, const Forest& f,
-                       const DesignParams& p, std::vector<double>& load) {
+                       const DesignParams& p, std::vector<double>& load,
+                       double* cable_lb_out) {
   (void)hubs;
   const size_t m = net.elen.size();
   load.assign(m, 0.0);
   std::vector<char> tree_edge(m, 0);
+  // Clusters are node-disjoint (forest partition), so like load/tree_edge
+  // this is shared without locks.
+  std::vector<int32_t> tree_deg(static_cast<size_t>(net.n), 0);
 
   // Group POIs by serving hub, nearest-first within each cluster.
   struct Item3 { int32_t hub, poi; double q; };
@@ -419,24 +568,36 @@ double sph_consolidate(const Net& net, const std::vector<int32_t>& pois,
                                      : static_cast<int>(std::thread::hardware_concurrency()),
                        static_cast<int>(clusters.size())));
   std::vector<double> cable_per_thread(static_cast<size_t>(nthreads), 0.0);
+  std::vector<double> lb_per_thread(static_cast<size_t>(nthreads), 0.0);
   auto worker = [&](int tid) {
     std::vector<double> dist(static_cast<size_t>(net.n));
     std::vector<int32_t> pe(static_cast<size_t>(net.n)), pn(static_cast<size_t>(net.n));
     std::vector<uint32_t> stamp(static_cast<size_t>(net.n), 0);
+    std::vector<int32_t> local_id(static_cast<size_t>(net.n), -1);
     uint32_t version = 0;
     for (size_t c = next.fetch_add(1); c < clusters.size() && !failed.load();
          c = next.fetch_add(1)) {
-      const double cable =
+      double cable =
           sph_cluster(net, f, p, clusters[c].first, clusters[c].second, load,
-                      tree_edge, dist, pe, pn, stamp, version);
-      if (cable < 0.0) failed.store(true);
-      else cable_per_thread[static_cast<size_t>(tid)] += cable;
+                      tree_edge, tree_deg, dist, pe, pn, stamp, version);
+      if (cable < 0.0) {
+        failed.store(true);
+      } else {
+        cable = da_cluster(net, f, p, clusters[c].first, clusters[c].second,
+                           load, tree_edge, cable, local_id,
+                           lb_per_thread[static_cast<size_t>(tid)]);
+        cable_per_thread[static_cast<size_t>(tid)] += cable;
+      }
     }
   };
   std::vector<std::thread> pool;
   pool.reserve(static_cast<size_t>(nthreads));
   for (int t = 0; t < nthreads; ++t) pool.emplace_back(worker, t);
   for (auto& th : pool) th.join();
+  if (cable_lb_out) {
+    *cable_lb_out = 0.0;
+    for (double l : lb_per_thread) *cable_lb_out += l;
+  }
   if (failed.load()) return -1.0;
   double cable = 0.0;
   for (double c : cable_per_thread) cable += c;
@@ -455,22 +616,39 @@ Eval evaluate(const Net& net, const std::vector<int32_t>& pois,
   for (size_t e = 0; e < load.size(); ++e)
     if (load[e] > 0.0) cable += net.elen[e];
   ev.cable_m = cable;
-  ev.cost = p.hub_cost * static_cast<double>(hubs.size()) +
-            p.cable_cost_per_m * cable;
-  ev.feasible = true;
   ev.used = used_from_loads(net, load);
+  const SpliceCharge sc = splice_charge(net, p, ev.used, hubs);
+  ev.splice_cost = sc.cost;
+  ev.splices = sc.branches;
+  ev.splices_mid = sc.mid;
+  ev.cost = p.hub_cost * static_cast<double>(hubs.size()) +
+            p.cable_cost_per_m * cable + sc.cost;
+  ev.feasible = true;
   ev.poi_hub.resize(pois.size());
   for (size_t i = 0; i < pois.size(); ++i)
     ev.poi_hub[i] = f.hub_of[static_cast<size_t>(pois[i])];
   if (consolidate) {
     std::vector<double> sph_load;
     const double sph_cable =
-        sph_consolidate(net, pois, dem, hubs, f, p, sph_load);
-    if (sph_cable >= 0.0 && sph_cable < ev.cable_m) {
-      ev.cable_m = sph_cable;
-      ev.cost = p.hub_cost * static_cast<double>(hubs.size()) +
-                p.cable_cost_per_m * sph_cable;
-      ev.used = used_from_loads(net, sph_load);
+        sph_consolidate(net, pois, dem, hubs, f, p, sph_load, &ev.cable_lb);
+    if (sph_cable >= 0.0) {
+      std::vector<DesignUsedEdge> sph_used = used_from_loads(net, sph_load);
+      const SpliceCharge s2 = splice_charge(net, p, sph_used, hubs);
+      // Compare in cable-equivalent meters so the splice-free path stays
+      // bit-identical to the pre-splice behavior.
+      const double d_eq =
+          p.cable_cost_per_m > 0.0
+              ? (s2.cost - ev.splice_cost) / p.cable_cost_per_m
+              : 0.0;
+      if (sph_cable + d_eq < ev.cable_m) {
+        ev.cable_m = sph_cable;
+        ev.splice_cost = s2.cost;
+        ev.splices = s2.branches;
+        ev.splices_mid = s2.mid;
+        ev.cost = p.hub_cost * static_cast<double>(hubs.size()) +
+                  p.cable_cost_per_m * sph_cable + s2.cost;
+        ev.used = std::move(sph_used);
+      }
     }
   }
   ev.hubs = std::move(hubs);
@@ -805,8 +983,18 @@ DesignResult design(const StreetGraph& g, const std::vector<int32_t>& pois,
       node_dem[static_cast<size_t>(pois[i])] += dem[i];
     const double before = best.cost;
     slide_hubs(net, node_dem, p, best);
+    // Sliding a hub onto a junction turns that splice into a (free) cabinet
+    // and removing stubs changes degrees: recharge splices exactly.
+    const SpliceCharge sc = splice_charge(net, p, best.used, best.hubs);
+    best.cost += sc.cost - best.splice_cost;
+    best.splice_cost = sc.cost;
+    best.splices = sc.branches;
+    best.splices_mid = sc.mid;
     if (p.verbose && best.cost < before - 1e-9)
       std::printf("hub slide: -%.0f (cable stubs removed)\n", before - best.cost);
+    // The DA bound was computed for the pre-slide roots; sliding a hub off a
+    // stub re-roots its cluster, so clamp to keep cable_lb <= cable_m.
+    best.cable_lb = std::min(best.cable_lb, best.cable_m);
   }
 
   DesignResult res;
@@ -816,6 +1004,10 @@ DesignResult design(const StreetGraph& g, const std::vector<int32_t>& pois,
   res.cable_m = best.cable_m;
   res.hub_cost = p.hub_cost * res.hubs;
   res.cable_cost = p.cable_cost_per_m * best.cable_m;
+  res.splice_cost = best.splice_cost;
+  res.splices = best.splices;
+  res.splices_midblock = best.splices_mid;
+  res.cable_lb = best.cable_lb;
   res.total_cost = best.cost;
   res.hub_nodes = best.hubs;
   res.used_edges = std::move(best.used);

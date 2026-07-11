@@ -30,6 +30,13 @@ StreetGraph StreetGraph::load(const std::string& path) {
         throw std::runtime_error("node id out of range in street graph file");
       g.lon[static_cast<size_t>(id)] = lon;
       g.lat[static_cast<size_t>(id)] = lat;
+      std::string flag;
+      if (ss >> flag && flag == "m") {
+        if (g.midblock.empty())
+          g.midblock.assign(static_cast<size_t>(g.num_nodes), 0);
+        g.midblock[static_cast<size_t>(id)] = 1;
+      }
+      ss.clear();  // eof after optional flag is fine
     } else if (tag == 'e') {
       SArc a;
       ss >> a.tail >> a.head >> a.cost;

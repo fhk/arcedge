@@ -18,6 +18,10 @@ struct StreetGraph {
   int32_t num_nodes = 0;
   std::vector<SArc> arcs;
   std::vector<double> lon, lat;  // per node, for provenance/debugging
+  // Optional per-node flag: 1 = mid-block station (street midpoint, split
+  // foot) rather than an intersection corner. Written by the model compiler
+  // as a trailing "m" on `v` lines; empty when the file carries no flags.
+  std::vector<char> midblock;
 
   static StreetGraph load(const std::string& path);
 };

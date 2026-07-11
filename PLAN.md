@@ -459,6 +459,48 @@ Recommended order: Q3+Q4 first (days, no structure change), then Q1
 (the single biggest lever), Q2, then Q5 as the exact tail. Q8 runs offline
 alongside to tell us when to stop.
 
+## R3-10: side-of-street, splice costs, dual-ascent bounds (implemented 2026-07-11)
+
+Three realism/quality pieces landed together (plan: sides → splices → dual
+ascent, E2E gate green at each step; E2E step 11 exercises all three):
+
+1. **Dual-side street graphs** (compiler `sides:` block on the street
+   layer). Every street edge becomes two side chains `u–mid–v` sharing the
+   intersection nodes — corner crossings free, mid-block crossings priced as
+   a `footL–footR` edge at `mid_block_crossing_cost / cable_cost_per_m`
+   equivalent meters, drop feet split both sides so the optimizer picks
+   second-side trench vs bore per foot. Downtown: 452→3,034 nodes,
+   699→4,373 undirected edges, 393 crossing options; compile + 6-round
+   3-tier chain still ~1.2 s wall on 4 cores.
+2. **Splice costs** (`splices: {cost, mid_block_surcharge}` →
+   `--splice-cost/--splice-mid-surcharge`). Exact charging in every
+   accept/reject comparison: d−2 branches at non-hub tree nodes of degree
+   d ≥ 3, surcharge at mid-block nodes (flagged `v … m` in the graph
+   format), hubs exempt. SPH growth is steered by pricing branch-creating
+   steps in equivalent meters. Effect measured downtown (uncapped tier-1,
+   splice 150/mid 100): the solver trades branches for terminals
+   (87→107 hubs standalone) instead of eating the charge.
+3. **Wong dual ascent per cluster** (`src/arcedge/dual_ascent.{hpp,cpp}`).
+   Runs beside SPH per (edge-disjoint, parallel) cluster: per-cluster cable
+   lower bound (summed → `cable_lb`, first measured tree-optimality signal)
+   plus a candidate tree adopted when it beats SPH (uncapped edges).
+   Bound is conditional on hub set + assignment; clamped after hub slides.
+
+Measured (downtown SF, 400 addresses, 6 joint rounds, 4-core container):
+
+| chain | total | tier gaps (tree) | notes |
+|---|---:|---|---|
+| centerline (`sf_dt_ftth_tiers.yaml`) | **546,379** | terminal 0.1%, FDH 4.3% | unchanged from R3-9 — baseline preserved with DA active |
+| sided + splices (`sf_dt_ftth_sides.yaml`) | **626,441** | terminal 0.0%, FDH 10.7% | +14.7% **realism correction** (both-side trenching, priced bores, 244 terminal-tier splices) — not comparable to centerline numbers |
+
+Single-tier capacity baseline still exactly **392,123**; DA replacement on
+the uncapped sided run cut cable 29,228→29,048 m standalone. The
+capacitated single-hub downtown design now reports its first bound:
+cable LB 34,472 m vs 37,212 built (7.36% tree gap under edge caps).
+Terminal-tier trees are certified ≈optimal (gap ≤ 0.1%); the remaining
+measured slack is in FDH/OLT feeder trees (4–11%) — exactly where R3-9's
+Q7 key-path search should aim next.
+
 ## Joint-chain benchmark (user-reported, Colab GPU-class runtime, 2026-07-03)
 
 Machine: AMD EPYC 9B45, 48 vCPU, 176 GB RAM (RTX PRO 6000 Blackwell present

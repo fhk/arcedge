@@ -1,0 +1,54 @@
+# Downtown SF FTTH with side-of-street modeling and splice costs.
+#
+# Each street becomes two side chains sharing the intersection nodes, so
+# crossing at a corner is free; crossing mid-block is a priced boring
+# (mid_block_crossing_cost, charged as cost-equivalent cable meters).
+# Every cable branch at a non-hub node pays a splice, with a surcharge for
+# splices opened mid-block (street midpoints, drop feet) instead of at
+# corners.
+#
+#   python3 scripts/arcedge_modelc.py examples/sf_dt_ftth_sides.yaml \
+#       -o out/dt_ftth_sides --solve --rounds 6
+model_version: 1
+name: sf-dt-ftth-sides
+
+layers:
+  streets:
+    source: { file: data/sf_downtown.graph }
+    sides:
+      enabled: true
+      mid_block_crossing_cost: 800   # per bore, money
+      offset_m: 3                    # cosmetic L/R offset for exports
+  addresses:
+    source: { csv: examples/sf_dt_pois.csv }
+    role: terminals
+
+couplings:
+  - name: drops
+    from: addresses
+    to: streets
+    method: nearest_edge_split
+    snap_m: 0.5
+
+facilities:
+  terminal:
+    open_cost: 500
+    capacity: { hard: 12 }
+  fdh:
+    open_cost: 20000
+    capacity: { hard: 512 }
+  olt:
+    open_cost: 100000
+    capacity: { hard: 4000 }
+
+cable:
+  fixed_cost_per_m: 10
+  reuse_factor: 0.25
+
+splices:
+  cost: 150                 # per branch at a non-hub tree node (degree >= 3)
+  mid_block_surcharge: 100  # extra when that node sits mid-block
+
+commodities:
+  - name: service
+    assignment: { from: { nodes: { layer: addresses } }, demand: 1, tier: terminal }

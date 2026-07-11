@@ -27,6 +27,7 @@ void usage() {
       "              [--result FILE] [--flow FILE] [--no-primal] [--quiet]\n"
       "  arcedge design --graph FILE --pois FILE [--cap X] [--hub-cap X]\n"
       "              [--hub-cost X] [--cable-cost X] [--demand-transit]\n"
+      "              [--splice-cost X] [--splice-mid-surcharge X]\n"
       "              [--max-k N] [--threads N] [--seed N] [--result FILE]\n"
       "              [--solution FILE] [--quiet]\n"
       "  (pois file lines: <node-id> [demand]; caps <= 0 mean uncapacitated)\n");
@@ -133,6 +134,8 @@ int run_design(int argc, char** argv) {
     else if (std::strcmp(argv[i], "--demand-transit") == 0) p.demand_transit = true;
     else if (arg_match(argc, argv, i, "--hub-cost", v)) p.hub_cost = std::stod(v);
     else if (arg_match(argc, argv, i, "--cable-cost", v)) p.cable_cost_per_m = std::stod(v);
+    else if (arg_match(argc, argv, i, "--splice-cost", v)) p.splice_cost = std::stod(v);
+    else if (arg_match(argc, argv, i, "--splice-mid-surcharge", v)) p.splice_midblock_surcharge = std::stod(v);
     else if (arg_match(argc, argv, i, "--max-k", v)) p.max_k = std::stoi(v);
     else if (arg_match(argc, argv, i, "--threads", v)) p.threads = std::stoi(v);
     else if (arg_match(argc, argv, i, "--seed", v)) p.seed = static_cast<unsigned>(std::stoul(v));
@@ -169,16 +172,30 @@ int run_design(int argc, char** argv) {
     std::fprintf(stderr, "design infeasible: POIs disconnected or capacity too tight\n");
     return 1;
   }
-  std::printf("design result: hubs %d (cost %.0f) + cable %.0f m (cost %.0f)\n"
-              "TOTAL COST %.0f  (time %.0f ms)\n",
-              res.hubs, res.hub_cost, res.cable_m, res.cable_cost,
-              res.total_cost, res.millis);
+  std::printf("design result: hubs %d (cost %.0f) + cable %.0f m (cost %.0f)",
+              res.hubs, res.hub_cost, res.cable_m, res.cable_cost);
+  if (res.splices > 0)
+    std::printf(" + splices %lld (%lld mid-block, cost %.0f)",
+                static_cast<long long>(res.splices),
+                static_cast<long long>(res.splices_midblock), res.splice_cost);
+  std::printf("\nTOTAL COST %.0f  (time %.0f ms)\n", res.total_cost, res.millis);
+  if (res.cable_lb > 0.0)
+    std::printf("cable LB %.0f m (tree gap %.2f%%, conditional on clustering)\n",
+                res.cable_lb,
+                res.cable_m > 0.0
+                    ? 100.0 * (res.cable_m - res.cable_lb) / res.cable_m
+                    : 0.0);
   if (!result_path.empty()) {
     std::ofstream out(result_path);
     out << std::setprecision(15);
     out << "hubs " << res.hubs << "\ncable_m " << res.cable_m << "\nhub_cost "
         << res.hub_cost << "\ncable_cost " << res.cable_cost << "\ntotal_cost "
         << res.total_cost << "\nms " << res.millis << "\n";
+    if (res.splices > 0 || res.splice_cost > 0.0)
+      out << "splices " << res.splices << "\nsplices_midblock "
+          << res.splices_midblock << "\nsplice_cost " << res.splice_cost
+          << "\n";
+    if (res.cable_lb > 0.0) out << "cable_lb " << res.cable_lb << "\n";
     out << "hub_nodes";
     for (int32_t h : res.hub_nodes) out << ' ' << h;
     out << "\n";

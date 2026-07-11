@@ -32,6 +32,55 @@ boolean `True`; the compiler tolerates both). Commodity sampling uses
 Python's `random.Random(seed)`, which is platform-portable — config-driven
 instances do not suffer the C++ `std::uniform_*` cross-platform divergence.
 
+## Side-of-street, splices, dual-ascent bounds (R3-10, implemented)
+
+```yaml
+layers:
+  streets:
+    source: { file: data/sf_streets.graph }
+    sides:
+      enabled: true
+      mid_block_crossing_cost: 800   # money per bore; null/omitted = forbidden
+      offset_m: 3                    # cosmetic L/R offset for exports
+
+splices:
+  cost: 150                 # per branch at a non-hub tree node (degree >= 3)
+  mid_block_surcharge: 100  # extra when the branch sits mid-block
+```
+
+**Sides.** Each street edge becomes two side chains `u–mid–v` (the midpoint
+keeps the parallel copies distinct through edge dedup in every reader).
+Chains share the original intersection nodes, so **corner crossings are
+free**; every drop foot splits *both* sides and gets a mid-block crossing
+edge between the two feet at cost-equivalent length
+`mid_block_crossing_cost / cable.fixed_cost_per_m` — the optimizer chooses
+between trenching the second side and boring across. Drops attach to the
+chain on their geometric side of the centerline. Midpoints, feet, and POI
+nodes are flagged mid-block in the emitted graph (`v id lon lat m`).
+Expect roughly 2× nodes / 2.3× edges and **higher, realism-corrected
+totals** — the centerline model undercounts double-side service.
+
+**Splices.** A cable branch at a non-hub tree node of degree ≥ 3 costs
+`splices.cost` per extra branch (a degree-d node carries d−2), plus the
+surcharge at mid-block nodes; hubs are exempt (a hub IS a splice cabinet).
+Charging is exact in the solver's objective (`--splice-cost`,
+`--splice-mid-surcharge`); SPH tree growth is steered away from creating
+new branches near existing ones by pricing branch-creating steps
+(approximate; the exact charge decides all accept/reject comparisons).
+
+**Dual-ascent cable bounds.** Wong dual ascent runs per cluster where SPH
+consolidation runs: it yields a per-cluster **lower bound on cable meters**
+(summed and reported as `cable_lb` in result files, `cable_lb_m` /
+`tree_gap_pct` per tier in `tiers_summary.json`) and a candidate
+replacement tree, adopted when it beats the SPH tree (uncapacitated edges
+only). The bound is **conditional on the hub set + POI assignment** — it
+certifies tree quality, not global optimality — and is clamped after hub
+slides (re-rooting invalidates the old-root bound at stub-length scale).
+Measured on downtown SF FTTH: terminal-tier gap 0.0–0.1%, FDH gap 4–11%;
+the centerline chain total is unchanged (546,379) while the sided chain
+lands at 626,441 (+14.7% realism correction, 393 crossing options, ~250
+terminal-tier splices).
+
 ## Goals
 
 - One declarative file specifies a **network model**: layers, entities,

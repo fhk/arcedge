@@ -101,6 +101,114 @@ def read_demand_geoparquet(path, spec):
     return out
 
 
+# ----------------------------------------------------------- dual sides --
+
+def nearest_edge_split_sided(street_nodes, street_edges, demand_pts, snap_m,
+                             max_length_m, cross_equiv_m, offset_m):
+    """Side-aware variant of nearest_edge_split: each street edge becomes two
+    side chains u-...-mid-...-v (corner crossings free via the shared
+    intersection nodes); drops attach to the chain on THEIR side of the
+    centerline; every drop foot also splits the twin side and gets a
+    mid-block crossing edge of cost-equivalent length cross_equiv_m (None =
+    mid-block crossings forbidden). Midpoint/foot/POI nodes are flagged
+    mid-block. Returns (nodes, edges, poi_node_of, drop_edges, cross_edges,
+    midblock, n_split, skipped_long)."""
+    from shapely import STRtree
+    from shapely.geometry import LineString, Point
+
+    xy = [project(lon, lat) for lon, lat in street_nodes]
+    chords = [LineString([xy[u], xy[v]]) for u, v, _ in street_edges]
+    tree = STRtree(chords)
+    pts = [Point(project(lon, lat)) for lon, lat, _ in demand_pts]
+    nearest = tree.query_nearest(pts, all_matches=False)
+    edge_of = {int(i): int(e) for i, e in zip(nearest[0], nearest[1])}
+
+    # Stations per (edge, side): t along the chord, plus who needs a node
+    # there. side +1 = left of u->v, -1 = right.
+    splits = {}  # edge -> list of (t, poi_idx, drop_len, side)
+    skipped_long = 0
+    for p_idx, pt in enumerate(pts):
+        e_idx = edge_of[p_idx]
+        chord = chords[e_idx]
+        t = chord.project(pt) / max(chord.length, 1e-12)
+        foot = chord.interpolate(chord.project(pt))
+        drop = pt.distance(foot)
+        if max_length_m is not None and drop > max_length_m:
+            skipped_long += 1
+            continue
+        (ux, uy), (vx, vy) = chord.coords[0], chord.coords[-1]
+        cross_z = (vx - ux) * (pt.y - uy) - (vy - uy) * (pt.x - ux)
+        side = 1 if cross_z >= 0 else -1
+        splits.setdefault(e_idx, []).append((t, p_idx, drop, side))
+
+    nodes = list(street_nodes)
+    midblock = set()
+    edges = []
+    drop_edges, cross_edges = set(), set()
+    poi_node_of = {}
+    n_split = 0
+
+    def add_node(x, y, mid=True):
+        nodes.append(unproject(x, y))
+        if mid:
+            midblock.add(len(nodes) - 1)
+        return len(nodes) - 1
+
+    for e_idx, (u, v, length) in enumerate(street_edges):
+        chord = chords[e_idx]
+        chord_len = max(chord.length, 1e-12)
+        (ux, uy), (vx, vy) = chord.coords[0], chord.coords[-1]
+        # Unit perpendicular (to the left of u->v) for cosmetic offsets.
+        px, py = -(vy - uy) / chord_len, (vx - ux) / chord_len
+        snap_t = snap_m / chord_len
+
+        # Build the station list per side: always the midpoint (keeps the two
+        # copies distinct through the edge-dedup in every reader), plus one
+        # station per drop foot ON BOTH sides (the twin hosts the crossing).
+        feet = sorted(splits.get(e_idx, []))
+        stations = {1: {0.5: None}, -1: {0.5: None}}  # t -> node id
+        for t, p_idx, drop, side in feet:
+            tc = min(max(t, 0.0), 1.0)
+            if tc <= snap_t or tc >= 1.0 - snap_t:
+                continue  # snaps to a shared corner node: no station needed
+            for s in (1, -1) if cross_equiv_m is not None else (side,):
+                stations[s].setdefault(tc, None)
+        # Materialize nodes and chains per side.
+        node_at = {}
+        for s in (1, -1):
+            prev_node, prev_t = u, 0.0
+            for t in sorted(stations[s]):
+                fx = ux + (vx - ux) * t + s * offset_m * px
+                fy = uy + (vy - uy) * t + s * offset_m * py
+                nid = add_node(fx, fy)
+                if t != 0.5:
+                    n_split += 1
+                node_at[(s, t)] = nid
+                edges.append((prev_node, nid, max(t - prev_t, 1e-4) * length))
+                prev_node, prev_t = nid, t
+            edges.append((prev_node, v, max(1.0 - prev_t, 1e-4) * length))
+        # Drops and mid-block crossings at the foot stations.
+        for t, p_idx, drop, side in feet:
+            tc = min(max(t, 0.0), 1.0)
+            if tc <= snap_t:
+                foot_node = u
+            elif tc >= 1.0 - snap_t:
+                foot_node = v
+            else:
+                foot_node = node_at[(side, tc)]
+            poi = add_node(*project(demand_pts[p_idx][0], demand_pts[p_idx][1]))
+            poi_node_of[p_idx] = poi
+            drop_edges.add(len(edges))
+            edges.append((poi, foot_node, max(drop, 0.1)))
+            if cross_equiv_m is not None and (side, tc) in node_at \
+                    and (-side, tc) in node_at:
+                cross_edges.add(len(edges))
+                edges.append((node_at[(side, tc)], node_at[(-side, tc)],
+                              cross_equiv_m))
+    return (nodes, edges, poi_node_of, drop_edges, cross_edges, midblock,
+            n_split, skipped_long)
+
+
 # ------------------------------------------------------------- coupling --
 
 def nearest_edge_split(street_nodes, street_edges, demand_pts, snap_m=0.5,
@@ -205,12 +313,13 @@ def resolve_edge_capacity(rules, layer_of_edge):
 
 # ------------------------------------------------------------ emitters ---
 
-def write_street_graph(path, nodes, edges):
+def write_street_graph(path, nodes, edges, midblock=None):
     with open(path, "w") as f:
         f.write("c compiled by arcedge_modelc\n")
         f.write(f"g {len(nodes)} {2 * len(edges)}\n")
         for i, (lon, lat) in enumerate(nodes):
-            f.write(f"v {i} {lon:.7f} {lat:.7f}\n")
+            flag = " m" if midblock and i in midblock else ""
+            f.write(f"v {i} {lon:.7f} {lat:.7f}{flag}\n")
         for u, v, w in edges:
             f.write(f"e {u} {v} {w:.2f}\ne {v} {u} {w:.2f}\n")
 
@@ -344,7 +453,7 @@ def resolve_design_edge_cap(edge_caps):
 
 
 def emit_design(out_dir, model, nodes, edges, edge_caps, poi_nodes,
-                poi_demands, report):
+                poi_demands, report, midblock=None):
     """One or more facility tiers. Tier order = declaration order; each tier
     serves the previous tier's opened facilities (demand = units served),
     starting from the coupled demand points. Multi-tier solving is chained
@@ -364,11 +473,12 @@ def emit_design(out_dir, model, nodes, edges, edge_caps, poi_nodes,
 
     graph = out_dir / "access.graph"
     pois = out_dir / "tier0.pois"
-    write_street_graph(graph, nodes, edges)
+    write_street_graph(graph, nodes, edges, midblock=midblock)
     with open(pois, "w") as f:
         for n, q in zip(poi_nodes, poi_demands):
             f.write(f"{n} {q:g}\n")
 
+    splices = model.get("splices") or {}
     passes = []
     for i, (tier_name, tier) in enumerate(tiers.items()):
         cap_spec = tier.get("capacity", {})
@@ -380,6 +490,8 @@ def emit_design(out_dir, model, nodes, edges, edge_caps, poi_nodes,
             "hub_cap": float(cap_spec.get("hard", 0)),
             "edge_cap": float(edge_cap),
             "cable_cost": float(tier.get("cable_cost_per_m", cable_cost)),
+            "splice_cost": float(splices.get("cost", 0.0)),
+            "splice_mid": float(splices.get("mid_block_surcharge", 0.0)),
             "demand_transit": i > 0,  # upper tiers sit on street cabinets
         })
 
@@ -448,6 +560,10 @@ def run_chain_once(out_dir, artifacts, arcedge_bin, open_adjust, tag, seed=1):
                "--cable-cost", f"{ps['cable_cost']:g}",
                "--seed", str(seed),
                "--quiet", "--result", str(result), "--solution", str(solution)]
+        if ps.get("splice_cost"):
+            cmd += ["--splice-cost", f"{ps['splice_cost']:g}"]
+        if ps.get("splice_mid"):
+            cmd += ["--splice-mid-surcharge", f"{ps['splice_mid']:g}"]
         if ps["demand_transit"]:
             cmd.append("--demand-transit")
         proc = subprocess.run(cmd, capture_output=True, text=True)
@@ -482,7 +598,8 @@ def run_chain_once(out_dir, artifacts, arcedge_bin, open_adjust, tag, seed=1):
             used_edges |= tier_edges
         else:
             cable_charged = cable_physical = res["cable_m"]
-        true_cost = res["hubs"] * ps["hub_cost"] + cable_charged * ps["cable_cost"]
+        true_cost = res["hubs"] * ps["hub_cost"] + cable_charged * ps["cable_cost"] \
+            + res.get("splice_cost", 0.0)
         dem_of = {}
         for line in open(pois_path):
             parts = line.split()
@@ -494,15 +611,31 @@ def run_chain_once(out_dir, artifacts, arcedge_bin, open_adjust, tag, seed=1):
             if parts and parts[0] == "p":
                 served[int(parts[2])] = served.get(int(parts[2]), 0.0) + \
                     dem_of.get(int(parts[1]), 1.0)
-        tiers.append(dict(tier=ps["tier"], hubs=int(res["hubs"]),
-                          cable_m=cable_physical, reused_m=reused_m,
-                          new_m=cable_physical - reused_m,
-                          cost=true_cost, ms=res.get("ms", 0.0),
-                          open_adjust=open_adjust[i],
-                          result=str(result), solution=str(solution),
-                          pois=str(pois_path)))
+        tier_rec = dict(tier=ps["tier"], hubs=int(res["hubs"]),
+                        cable_m=cable_physical, reused_m=reused_m,
+                        new_m=cable_physical - reused_m,
+                        cost=true_cost, ms=res.get("ms", 0.0),
+                        open_adjust=open_adjust[i],
+                        result=str(result), solution=str(solution),
+                        pois=str(pois_path))
+        if "splices" in res:
+            tier_rec["splices"] = int(res["splices"])
+            tier_rec["splices_midblock"] = int(res.get("splices_midblock", 0))
+            tier_rec["splice_cost"] = res.get("splice_cost", 0.0)
+        if res.get("cable_lb", 0.0) > 0.0:
+            # Wong dual-ascent bound on the SOLVER-metric cable (tier view
+            # with duct discounts), conditional on the tier's clustering.
+            tier_rec["cable_lb_m"] = res["cable_lb"]
+            tier_rec["tree_gap_pct"] = round(
+                100.0 * (res["cable_m"] - res["cable_lb"]) /
+                max(res["cable_m"], 1e-9), 3)
+        tiers.append(tier_rec)
         reused_note = (f", {reused_m:.0f} m reused x{reuse:g}"
                        if reused_m else "")
+        if tier_rec.get("splices"):
+            reused_note += f", {tier_rec['splices']} splices"
+        if "tree_gap_pct" in tier_rec:
+            reused_note += f", tree gap {tier_rec['tree_gap_pct']:.1f}%"
         print(f"  [{ps['tier']}] {int(res['hubs'])} facilities, "
               f"{cable_physical:.0f} m{reused_note}, true cost {true_cost:.0f}"
               + (f" (placement open +{open_adjust[i]:.0f})" if open_adjust[i] else ""),
@@ -596,6 +729,10 @@ def compile_model(cfg_path, out_dir):
     report["street_layer"] = {"name": street_name, "nodes": len(nodes),
                               "undirected_edges": len(edges)}
 
+    sides_spec = street_spec.get("sides") or {}
+    cable_rate = float((model.get("cable") or {}).get("fixed_cost_per_m", 10.0))
+    midblock = set()
+
     poi_nodes = []
     poi_demands = []
     for coup in model.get("couplings", []):
@@ -611,11 +748,26 @@ def compile_model(cfg_path, out_dir):
             pts = read_demand_geoparquet(dsrc["geoparquet"], dsrc)
         else:
             fail("demand layer source must be csv or geoparquet")
-        nodes, edges, poi_of, drop_edges, n_split, skipped = nearest_edge_split(
-            nodes, edges, pts, snap_m=float(coup.get("snap_m", 0.5)),
-            max_length_m=coup.get("max_length_m"))
-        # Street edges (including split children) keep the street layer tag;
-        # drops belong to the demand layer.
+        if sides_spec.get("enabled"):
+            cross_cost = sides_spec.get("mid_block_crossing_cost")
+            cross_equiv = None if cross_cost is None else \
+                float(cross_cost) / cable_rate
+            (nodes, edges, poi_of, drop_edges, cross_edges, midblock,
+             n_split, skipped) = nearest_edge_split_sided(
+                nodes, edges, pts, snap_m=float(coup.get("snap_m", 0.5)),
+                max_length_m=coup.get("max_length_m"),
+                cross_equiv_m=cross_equiv,
+                offset_m=float(sides_spec.get("offset_m", 3.0)))
+            report["sides"] = {"enabled": True,
+                               "mid_block_crossing_cost": cross_cost,
+                               "crossing_edges": len(cross_edges)}
+        else:
+            nodes, edges, poi_of, drop_edges, n_split, skipped = \
+                nearest_edge_split(
+                    nodes, edges, pts, snap_m=float(coup.get("snap_m", 0.5)),
+                    max_length_m=coup.get("max_length_m"))
+        # Street edges (including split children and crossings) keep the
+        # street layer tag; drops belong to the demand layer.
         layer_of_edge = [dl if i in drop_edges else street_name
                          for i in range(len(edges))]
         poi_nodes = [poi_of[i] for i in sorted(poi_of)]
@@ -636,7 +788,8 @@ def compile_model(cfg_path, out_dir):
         if not poi_nodes:
             fail("assignment commodities need a coupled terminals layer")
         artifacts = emit_design(out_dir, model, nodes, edges, edge_caps,
-                                poi_nodes, poi_demands, report)
+                                poi_nodes, poi_demands, report,
+                                midblock=midblock)
     else:
         artifacts = emit_mcf(out_dir, model, nodes, edges, edge_caps, report)
 

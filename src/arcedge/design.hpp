@@ -12,6 +12,12 @@ struct DesignParams {
   double hub_cap = 0.0;            // max demand units served per hub; <= 0 = uncap
   double hub_cost = 20000.0;       // fixed cost per opened hub
   double cable_cost_per_m = 10.0;  // fixed cost per meter of edge used
+  // Splice charging: every extra branch at a non-hub tree node of degree
+  // >= 3 costs splice_cost (a degree-d node carries d-2 branch splices); a
+  // branch at a mid-block node (see StreetGraph::midblock) pays the
+  // surcharge on top. Hubs are exempt -- a hub IS a splice cabinet.
+  double splice_cost = 0.0;
+  double splice_midblock_surcharge = 0.0;
   unsigned seed = 1;
   int max_k = 0;                   // 0 = derive from POI count
   int threads = 0;                 // 0 = hardware concurrency
@@ -31,7 +37,14 @@ struct DesignResult {
   double cable_m = 0.0;
   double hub_cost = 0.0;
   double cable_cost = 0.0;
+  double splice_cost = 0.0;   // total splice charges (0 when disabled)
+  int64_t splices = 0;        // branch splices charged (non-hub, degree>=3)
+  int64_t splices_midblock = 0;  // of which at mid-block nodes
   double total_cost = 0.0;
+  // Sum of per-cluster Wong dual-ascent lower bounds on cable meters,
+  // conditional on the final clustering (hub set + POI assignment): it
+  // measures tree quality, not global optimality. 0 when not computed.
+  double cable_lb = 0.0;
   bool feasible = false;
   double millis = 0.0;
   std::vector<int32_t> hub_nodes;

@@ -9,15 +9,15 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 export PYTHONUNBUFFERED=1  # progress must stream when piped (Colab, CI)
 
-echo "=== [1/10] build ==="
+echo "=== [1/11] build ==="
 NCORES=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
 cmake -B build -DCMAKE_BUILD_TYPE=Release >/dev/null
 cmake --build build -j"$NCORES" >/dev/null
 
-echo "=== [2/10] unit tests ==="
+echo "=== [2/11] unit tests ==="
 ctest --test-dir build --output-on-failure
 
-echo "=== [3/10] small instance: solve + HiGHS validation ==="
+echo "=== [3/11] small instance: solve + HiGHS validation ==="
 mkdir -p data
 ./build/arcedge gen --out data/small.txt --width 10 --height 10 --time 8 \
   --commodities 10 --cap 3 --hubs 2 --seed 42
@@ -25,14 +25,14 @@ mkdir -p data
   --result data/small.result
 python3 scripts/validate_lp.py data/small.txt data/small.result
 
-echo "=== [4/10] medium instance: solve + HiGHS validation ==="
+echo "=== [4/11] medium instance: solve + HiGHS validation ==="
 ./build/arcedge gen --out data/medium.txt --width 20 --height 20 --time 12 \
   --commodities 30 --cap 4 --hubs 3 --seed 7
 ./build/arcedge solve data/medium.txt --iters 400 --tol 0.002 --quiet \
   --result data/medium.result
 python3 scripts/validate_lp.py data/medium.txt data/medium.result
 
-echo "=== [5/10] large instance (~1M arcs): certified LB/UB gap ==="
+echo "=== [5/11] large instance (~1M arcs): certified LB/UB gap ==="
 ./build/arcedge gen --out data/large.txt --width 70 --height 70 --time 45 \
   --commodities 250 --cap 3 --hubs 4 --hub-frac 0.7 --seed 11
 ./build/arcedge solve data/large.txt --iters 150 --tol 0.01 --primal-every 15 \
@@ -42,20 +42,20 @@ echo "=== [5/10] large instance (~1M arcs): certified LB/UB gap ==="
 # were produced by scripts/overture_to_graph.py from an Overture
 # transportation-segment GeoParquet; rerun that step with:
 #   python3 scripts/overture_to_graph.py streets.parquet data/sf_streets.graph
-echo "=== [6/10] downtown SF (Overture import): solve + HiGHS validation ==="
+echo "=== [6/11] downtown SF (Overture import): solve + HiGHS validation ==="
 ./build/arcedge gen --street data/sf_downtown.graph --out data/sf_dt_te.txt \
   --time 12 --commodities 12 --cap 4 --hubs 2 --hub-frac 0.6 --seed 23
 ./build/arcedge solve data/sf_dt_te.txt --iters 400 --tol 0.002 --quiet \
   --result data/sf_dt_te.result --flow data/sf_dt_te.flow
 python3 scripts/validate_lp.py data/sf_dt_te.txt data/sf_dt_te.result
 
-echo "=== [7/10] full SF street network (~1.7M TE arcs): certified gap ==="
+echo "=== [7/11] full SF street network (~1.7M TE arcs): certified gap ==="
 ./build/arcedge gen --street data/sf_streets.graph --out data/sf_te.txt \
   --time 36 --commodities 150 --cap 8 --hubs 5 --hub-frac 0.5 --seed 17
 ./build/arcedge solve data/sf_te.txt --iters 120 --tol 0.01 --primal-every 10 \
   --result data/sf_te.result
 
-echo "=== [8/10] downtown SF hub design (POI access network) vs HiGHS MIP ==="
+echo "=== [8/11] downtown SF hub design (POI access network) vs HiGHS MIP ==="
 # data/sf_dt_access.* were produced by scripts/connect_pois.py: every POI is
 # connected to its nearest street edge by a perpendicular drop that splits
 # the edge at the foot point.
@@ -67,7 +67,7 @@ echo "=== [8/10] downtown SF hub design (POI access network) vs HiGHS MIP ==="
 python3 scripts/validate_design_mip.py data/sf_dt_access.graph \
   data/sf_dt_access.pois data/sf_dt_design.result --time-limit 120
 
-echo "=== [9/10] solution output: map to street geometry, write GeoParquet ==="
+echo "=== [9/11] solution output: map to street geometry, write GeoParquet ==="
 # Requires pyarrow + shapely (same as the Overture importer).
 python3 scripts/solution_to_geoparquet.py flow \
   --street data/sf_downtown.graph --instance data/sf_dt_te.txt \
@@ -77,7 +77,7 @@ python3 scripts/solution_to_geoparquet.py design \
   --graph data/sf_dt_access.graph --pois data/sf_dt_access.pois \
   --solution data/sf_dt_design.solution --out data/sf_dt_design.parquet
 
-echo "=== [10/10] model config: compile examples, solve, check acceptance ==="
+echo "=== [10/11] model config: compile examples, solve, check acceptance ==="
 # Requires pyyaml. R3-7a acceptance: the declarative configs reproduce the
 # hand-built pipelines -- design must land on the known 392,123 total, and
 # the soft-capacity MCF must close to <= 1% (it cannot go hard-infeasible).
@@ -117,10 +117,46 @@ print(f"model-config acceptance OK: design total {total:.0f} "
       f"{tiers['olt']['hubs']}o = {t['total_cost']:.0f}")
 PYEOF
 
+echo "=== [11/11] side-of-street + splices + dual-ascent bounds (R3-10) ==="
+# Dual-side graph: two chains per street sharing the corner nodes (corner
+# crossings free), drop feet split BOTH sides, mid-block crossings priced as
+# cost-equivalent cable. Splices charged per non-hub branch; Wong dual
+# ascent certifies per-tier cable bounds (conditional on the clustering).
+python3 scripts/arcedge_modelc.py examples/sf_dt_ftth_sides.yaml \
+  -o out/dt_ftth_sides --solve --rounds 2
+python3 - <<'PYEOF'
+import json
+man = json.load(open('out/dt_ftth_sides/manifest.json'))
+sides = man['report']['sides']
+assert sides['enabled'] and sides['crossing_edges'] > 0, 'no crossing edges'
+# The sided access graph must carry mid-block flags for the splice surcharge.
+flags = sum(1 for l in open('out/dt_ftth_sides/access.graph')
+            if l.startswith('v ') and l.rstrip().endswith(' m'))
+assert flags > 0, 'no mid-block flags in sided access graph'
+t = json.load(open('out/dt_ftth_sides/tiers_summary.json'))
+for tier in t['tiers']:
+    r = dict(l.split() for l in open(tier['result'])
+             if not l.startswith('hub_nodes'))
+    if float(r.get('cable_lb', 0)) > 0:
+        assert float(r['cable_lb']) <= float(r['cable_m']) + 1e-6, \
+            f"{tier['tier']}: cable_lb above built cable"
+term = next(x for x in t['tiers'] if x['tier'] == 'terminal')
+assert term.get('splices', 0) > 0, 'no splices charged on the sided design'
+gaps = {x['tier']: x.get('tree_gap_pct') for x in t['tiers']
+        if 'tree_gap_pct' in x}
+print(f"sides acceptance OK: {sides['crossing_edges']} mid-block crossings, "
+      f"{term['splices']} terminal-tier splices "
+      f"({term.get('splices_midblock', 0)} mid-block), "
+      f"tree gaps {gaps}, chain total {t['total_cost']:.0f} "
+      f"(realism-corrected; not comparable to the centerline chain)")
+PYEOF
+
 echo
 echo "E2E PASSED: unit tests green, HiGHS confirms lb <= LP* <= ub on"
 echo "synthetic small/medium and downtown SF, the synthetic-large and"
 echo "full-SF instances close to certified gaps, the hub design beats"
 echo "or matches the time-limited HiGHS MIP incumbent on downtown SF,"
-echo "both solutions round-trip to GeoParquet geometry, and the model"
-echo "compiler reproduces the hand-built pipelines from example configs."
+echo "both solutions round-trip to GeoParquet geometry, the model"
+echo "compiler reproduces the hand-built pipelines from example configs,"
+echo "and the side-of-street FTTH chain prices crossings and splices with"
+echo "dual-ascent cable bounds certified per tier."

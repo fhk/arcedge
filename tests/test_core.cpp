@@ -8,6 +8,7 @@
 
 #include "arcedge/design.hpp"
 #include "arcedge/dijkstra.hpp"
+#include "arcedge/dual_ascent.hpp"
 #include "arcedge/generator.hpp"
 #include "arcedge/graph.hpp"
 #include "arcedge/lagrangian.hpp"
@@ -306,6 +307,117 @@ static void test_design_hub_slide() {
   CHECK(res.hub_nodes[0] == 0);  // slid onto the junction splice
 }
 
+// Wong dual ascent, hand-solvable instances. On a path graph the bound is
+// exact: LB = optimum = tree cost. On a Steiner instance with a shared stem
+// (root->1 (2), 1->{2,3} (2 each), plus direct arcs root->{2,3} (3 each);
+// optimum = 6 either way) the sandwich LB <= 6 <= tree must hold. A terminal
+// with no incoming path yields feasible = false.
+static void test_dual_ascent_bounds() {
+  {  // path 0 -5-> 1 -7-> 2 -9-> 3: exact
+    DualAscentResult r = steiner_dual_ascent(4, {0, 1, 2}, {1, 2, 3},
+                                             {5.0, 7.0, 9.0}, 0, {3});
+    CHECK(r.feasible);
+    CHECK(std::abs(r.lower_bound - 21.0) < 1e-9);
+    CHECK(r.tree_arcs.size() == 3);
+  }
+  {  // Steiner stem-vs-direct: optimum 6
+    const std::vector<int32_t> tail = {0, 1, 1, 0, 0};
+    const std::vector<int32_t> head = {1, 2, 3, 2, 3};
+    const std::vector<double> cost = {2.0, 2.0, 2.0, 3.0, 3.0};
+    DualAscentResult r = steiner_dual_ascent(4, tail, head, cost, 0, {2, 3});
+    CHECK(r.feasible);
+    double tree_cost = 0.0;
+    for (int32_t a : r.tree_arcs) tree_cost += cost[static_cast<size_t>(a)];
+    CHECK(r.lower_bound <= 6.0 + 1e-9);
+    CHECK(tree_cost >= 6.0 - 1e-9);            // no tree beats the optimum
+    CHECK(r.lower_bound <= tree_cost + 1e-9);  // bound sandwich
+    // Both terminals actually reached from the root over tree arcs.
+    std::vector<char> seen(4, 0);
+    seen[0] = 1;
+    for (size_t guard = 0; guard < r.tree_arcs.size(); ++guard)
+      for (int32_t a : r.tree_arcs)
+        if (seen[static_cast<size_t>(tail[static_cast<size_t>(a)])])
+          seen[static_cast<size_t>(head[static_cast<size_t>(a)])] = 1;
+    CHECK(seen[2] && seen[3]);
+  }
+  {  // unreachable terminal
+    DualAscentResult r =
+        steiner_dual_ascent(3, {0}, {1}, {1.0}, 0, {2});
+    CHECK(!r.feasible);
+  }
+}
+
+// Splice charging: streets C1(0) - C2(1) (100 m), two 10 m drops at each.
+// Any single hub sits on C1 or C2; the OTHER junction carries the cable
+// through plus two drops (tree degree 3) = exactly one non-hub branch.
+// Base: hub 20000 + cable 140 m * 10 = 21400. splice_cost 500 must add
+// exactly 500; marking the junctions mid-block must add the surcharge too.
+static void test_design_splice_cost() {
+  StreetGraph g;
+  g.num_nodes = 6;  // 0=C1 1=C2 2,3=pois@C1 4,5=pois@C2
+  g.lon = {-122.400, -122.399, -122.4001, -122.4001, -122.3989, -122.3989};
+  g.lat = {37.7700, 37.7700, 37.7701, 37.7699, 37.7701, 37.7699};
+  auto both = [&](int32_t u, int32_t v, double w) {
+    g.arcs.push_back({u, v, w});
+    g.arcs.push_back({v, u, w});
+  };
+  both(0, 1, 100);
+  both(2, 0, 10);
+  both(3, 0, 10);
+  both(4, 1, 10);
+  both(5, 1, 10);
+  DesignParams p;
+  p.edge_cap = 0;
+  p.hub_cost = 20000;
+  p.cable_cost_per_m = 10;
+  p.verbose = false;
+  DesignResult base = design(g, {2, 3, 4, 5}, p);
+  CHECK(base.feasible);
+  CHECK(base.hubs == 1);
+  CHECK(std::abs(base.total_cost - 21400.0) < 1e-6);
+  CHECK(base.splices == 0 && base.splice_cost == 0.0);
+
+  p.splice_cost = 500;
+  DesignResult sp = design(g, {2, 3, 4, 5}, p);
+  CHECK(sp.feasible);
+  CHECK(sp.splices == 1);
+  CHECK(std::abs(sp.total_cost - 21900.0) < 1e-6);
+
+  g.midblock.assign(6, 0);
+  g.midblock[0] = g.midblock[1] = 1;  // both junctions mid-block
+  p.splice_midblock_surcharge = 100;
+  DesignResult mb = design(g, {2, 3, 4, 5}, p);
+  CHECK(mb.feasible);
+  CHECK(mb.splices == 1 && mb.splices_midblock == 1);
+  CHECK(std::abs(mb.total_cost - 22000.0) < 1e-6);
+}
+
+// The dual-ascent cable bound is reported and sandwiches the built cable on
+// a design where the tree is forced (path graph): LB == cable exactly.
+static void test_design_cable_lb() {
+  StreetGraph g;
+  g.num_nodes = 4;  // 0 - 1 - 2 streets, poi 3 drops at 2
+  g.lon = {-122.400, -122.399, -122.398, -122.398};
+  g.lat = {37.7700, 37.7700, 37.7700, 37.7701};
+  auto both = [&](int32_t u, int32_t v, double w) {
+    g.arcs.push_back({u, v, w});
+    g.arcs.push_back({v, u, w});
+  };
+  both(0, 1, 50);
+  both(1, 2, 50);
+  both(3, 2, 10);
+  DesignParams p;
+  p.edge_cap = 0;
+  p.hub_cost = 1000;
+  p.cable_cost_per_m = 10;
+  p.verbose = false;
+  DesignResult res = design(g, {3}, p);
+  CHECK(res.feasible);
+  CHECK(res.cable_lb > 0.0);
+  CHECK(res.cable_lb <= res.cable_m + 1e-9);
+  CHECK(std::abs(res.cable_lb - res.cable_m) < 1e-6);  // forced tree: exact
+}
+
 int main() {
   test_dijkstra();
   test_diamond_exact();
@@ -316,6 +428,9 @@ int main() {
   test_design_capacity_repair();
   test_design_hub_capacity();
   test_design_hub_slide();
+  test_dual_ascent_bounds();
+  test_design_splice_cost();
+  test_design_cable_lb();
   test_dag_backend_equivalence();
   if (failures == 0) {
     std::printf("all tests passed\n");
