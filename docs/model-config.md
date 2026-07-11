@@ -55,10 +55,13 @@ free**; every drop foot splits *both* sides and gets a mid-block crossing
 edge between the two feet at cost-equivalent length
 `mid_block_crossing_cost / cable.fixed_cost_per_m` — the optimizer chooses
 between trenching the second side and boring across. Drops attach to the
-chain on their geometric side of the centerline. Midpoints, feet, and POI
-nodes are flagged mid-block in the emitted graph (`v id lon lat m`).
-Expect roughly 2× nodes / 2.3× edges and **higher, realism-corrected
-totals** — the centerline model undercounts double-side service.
+chain on their geometric side of the centerline; feet within `snap_m`
+share one station (stacked address points must not spawn ~0-length
+micro-station chains — unmerged, capacity relief bounces between them and
+the tier goes spuriously infeasible). Midpoints, feet, and POI nodes are
+flagged mid-block in the emitted graph (`v id lon lat m`). Expect roughly
+2× nodes / 2.3× edges and **higher, realism-corrected totals** — the
+centerline model undercounts double-side service.
 
 **Splices.** A cable branch at a non-hub tree node of degree ≥ 3 costs
 `splices.cost` per extra branch (a degree-d node carries d−2), plus the
@@ -76,9 +79,9 @@ replacement tree, adopted when it beats the SPH tree (uncapacitated edges
 only). The bound is **conditional on the hub set + POI assignment** — it
 certifies tree quality, not global optimality — and is clamped after hub
 slides (re-rooting invalidates the old-root bound at stub-length scale).
-Measured on downtown SF FTTH: terminal-tier gap 0.0–0.1%, FDH gap 4–11%;
+Measured on downtown SF FTTH: terminal-tier gap 0.0–0.3%, FDH gap 4–11%;
 the centerline chain total is unchanged (546,379) while the sided chain
-lands at 626,441 (+14.7% realism correction, 393 crossing options, ~250
+lands at 621,895 (+13.8% realism correction, 393 crossing options, 240
 terminal-tier splices).
 
 ## Goals

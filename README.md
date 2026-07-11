@@ -169,6 +169,20 @@ it slides onto the branch junction, where the splice lives anyway, removing
 the stub), and **seed-diversified rounds** (once feedback converges,
 remaining rounds explore fresh solver seeds; best chain wins).
 
+**Side-of-street + splices + cable bounds** (R3-10, E2E step 11). A
+`sides:` block on the street layer turns every street into two side chains
+sharing the corner nodes — corner crossings free, mid-block crossings
+priced per bore — with drops attaching on their geometric side; a
+`splices:` block charges every cable branch at a non-hub node (plus a
+mid-block surcharge), which the solver trades against opening more
+terminals. Wong dual ascent runs per cluster and reports a per-tier
+**cable lower bound** (`tree gap` in the chain output): terminal-tier
+trees measure ≈optimal (≤0.3%), FDH feeder trees 4–11% — the first
+measured optimality signal for design mode. Sided totals are
+realism-corrected (downtown: 621,895 vs 546,379 centerline, +13.8%) and
+not comparable to centerline numbers. See `examples/sf_dt_ftth_sides.yaml`
+and `docs/model-config.md`.
+
 Full-city SF (54,921 Overture address points, `--rounds 6`,
 `reuse_factor: 0.25`):
 

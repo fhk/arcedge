@@ -165,10 +165,22 @@ def nearest_edge_split_sided(street_nodes, street_edges, demand_pts, snap_m,
         # Build the station list per side: always the midpoint (keeps the two
         # copies distinct through the edge-dedup in every reader), plus one
         # station per drop foot ON BOTH sides (the twin hosts the crossing).
+        # Feet closer than snap_m along the chord share one station (like the
+        # centerline splitter): without this, stacked address points spawn
+        # chains of ~0-length micro-stations that capacity relief can bounce
+        # between forever.
         feet = sorted(splits.get(e_idx, []))
+        rep_of = {}
+        prev = None
+        for tc in sorted({min(max(t, 0.0), 1.0) for t, _, _, _ in feet}):
+            if prev is not None and tc - prev < snap_t:
+                rep_of[tc] = rep_of[prev]
+            else:
+                rep_of[tc] = tc
+            prev = tc
         stations = {1: {0.5: None}, -1: {0.5: None}}  # t -> node id
         for t, p_idx, drop, side in feet:
-            tc = min(max(t, 0.0), 1.0)
+            tc = rep_of[min(max(t, 0.0), 1.0)]
             if tc <= snap_t or tc >= 1.0 - snap_t:
                 continue  # snaps to a shared corner node: no station needed
             for s in (1, -1) if cross_equiv_m is not None else (side,):
@@ -189,7 +201,7 @@ def nearest_edge_split_sided(street_nodes, street_edges, demand_pts, snap_m,
             edges.append((prev_node, v, max(1.0 - prev_t, 1e-4) * length))
         # Drops and mid-block crossings at the foot stations.
         for t, p_idx, drop, side in feet:
-            tc = min(max(t, 0.0), 1.0)
+            tc = rep_of[min(max(t, 0.0), 1.0)]
             if tc <= snap_t:
                 foot_node = u
             elif tc >= 1.0 - snap_t:

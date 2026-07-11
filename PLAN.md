@@ -469,17 +469,22 @@ ascent, E2E gate green at each step; E2E step 11 exercises all three):
    intersection nodes — corner crossings free, mid-block crossings priced as
    a `footL–footR` edge at `mid_block_crossing_cost / cable_cost_per_m`
    equivalent meters, drop feet split both sides so the optimizer picks
-   second-side trench vs bore per foot. Downtown: 452→3,034 nodes,
-   699→4,373 undirected edges, 393 crossing options; compile + 6-round
-   3-tier chain still ~1.2 s wall on 4 cores.
+   second-side trench vs bore per foot. Feet within `snap_m` of each other
+   share one station — without that merge, stacked address points (a
+   210-unit block face exists in the SF data) spawn ~0-length micro-station
+   chains that capacity relief bounces between until the round limit
+   (measured: full-SF tier-1 spuriously infeasible at 35k hubs; with the
+   merge it solves in 12 s at 12,856 terminals). Downtown: 452→3,020
+   nodes, 699→4,359 undirected edges, 393 crossing options; compile +
+   6-round 3-tier chain still ~1.3 s wall on 4 cores.
 2. **Splice costs** (`splices: {cost, mid_block_surcharge}` →
    `--splice-cost/--splice-mid-surcharge`). Exact charging in every
    accept/reject comparison: d−2 branches at non-hub tree nodes of degree
    d ≥ 3, surcharge at mid-block nodes (flagged `v … m` in the graph
    format), hubs exempt. SPH growth is steered by pricing branch-creating
-   steps in equivalent meters. Effect measured downtown (uncapped tier-1,
-   splice 150/mid 100): the solver trades branches for terminals
-   (87→107 hubs standalone) instead of eating the charge.
+   steps in equivalent meters, and the joint rounds trade branch charges
+   against terminal count (downtown chain: 240 terminal-tier splices
+   survive at 150 + 100 mid-block).
 3. **Wong dual ascent per cluster** (`src/arcedge/dual_ascent.{hpp,cpp}`).
    Runs beside SPH per (edge-disjoint, parallel) cluster: per-cluster cable
    lower bound (summed → `cable_lb`, first measured tree-optimality signal)
@@ -491,15 +496,27 @@ Measured (downtown SF, 400 addresses, 6 joint rounds, 4-core container):
 | chain | total | tier gaps (tree) | notes |
 |---|---:|---|---|
 | centerline (`sf_dt_ftth_tiers.yaml`) | **546,379** | terminal 0.1%, FDH 4.3% | unchanged from R3-9 — baseline preserved with DA active |
-| sided + splices (`sf_dt_ftth_sides.yaml`) | **626,441** | terminal 0.0%, FDH 10.7% | +14.7% **realism correction** (both-side trenching, priced bores, 244 terminal-tier splices) — not comparable to centerline numbers |
+| sided + splices (`sf_dt_ftth_sides.yaml`) | **621,895** | terminal 0.3%, FDH 9.8% | +13.8% **realism correction** (both-side trenching, priced bores, 240 terminal-tier splices) — not comparable to centerline numbers |
 
-Single-tier capacity baseline still exactly **392,123**; DA replacement on
-the uncapped sided run cut cable 29,228→29,048 m standalone. The
-capacitated single-hub downtown design now reports its first bound:
-cable LB 34,472 m vs 37,212 built (7.36% tree gap under edge caps).
-Terminal-tier trees are certified ≈optimal (gap ≤ 0.1%); the remaining
-measured slack is in FDH/OLT feeder trees (4–11%) — exactly where R3-9's
-Q7 key-path search should aim next.
+Full-city SF (54,921 addresses, sides + splices + DA, 6 joint rounds,
+4-core container, ~55 s/round):
+
+| chain | total | facilities | tree gaps | splices |
+|---|---:|---|---|---:|
+| centerline (R3-9 reference) | 33,737,619 | 10,511 t / ~200 f / 24 o | n/a (pre-DA) | n/a |
+| sided + splices | **41,989,008** | 11,896 t / 202 f / 22 o | terminal 0.1%, FDH 4.3%, OLT 4.5% | 21,167 t + 3,724 f + 96 o |
+
+The +24.5% is the realism correction at city scale: both-side trenching,
+53,840 priced mid-block crossing options, and ~25k charged splices. The
+feeder/trunk trees carry a certified ≤5% tree gap on every tier.
+
+Single-tier capacity baseline still exactly **392,123**, and it now
+reports its first bound: cable LB 34,472 m vs 37,212 built (7.36% tree
+gap under edge caps). The uncapped sided tier-1 standalone certifies to a
+0.01% tree gap (LB 31,329 m vs 31,332 built). Terminal-tier trees are
+≈optimal everywhere (gap ≤ 0.3%); the remaining measured slack is in
+FDH/OLT feeder trees (4–11%) — exactly where R3-9's Q7 key-path search
+should aim next.
 
 ## Joint-chain benchmark (user-reported, Colab GPU-class runtime, 2026-07-03)
 
